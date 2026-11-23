@@ -1,18 +1,13 @@
 name: Trading 212 Market Hours Live Runner
 
 on:
-  schedule:
-    # ── London Stock Exchange (08:00 - 16:30 UTC / 09:00 - 17:30 CET, Mon-Fri) ──
-    # Morning Session: 07:55 UTC (08:55 CET) - boots 5m before open, avoids :00 queue traffic
-    - cron: '55 7 * * 1-5'
-    # Afternoon Session: 12:25 UTC (13:25 CET) - avoids :30 queue traffic
-    - cron: '25 12 * * 1-5'
-
+  # Automated triggers are driven exclusively by Cloudflare Worker Cron Triggers
+  # (07:55 UTC and 12:25 UTC Mon-Fri via https://leveraged-etp-engine.11shahpratik.workers.dev/)
   workflow_dispatch:
     inputs:
       duration_minutes:
-        description: 'Duration in minutes to run the engine (max 350 for GitHub Actions)'
-        required: true
+        description: 'Duration in minutes to run the engine (defaults to 270 or remaining market minutes until 16:35 UTC)'
+        required: false
         default: '270'
         type: string
 
@@ -30,42 +25,22 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 🛡️ Pre-Flight Market Hours Guard
+      - name: 🛡️ Pre-Flight Market Hours Check
         id: market_check
         run: |
-          # If triggered manually via workflow_dispatch, always allow running (e.g. for testing)
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manual trigger detected. Bypassing market hours guard."
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Evaluated in UTC
           DOW=$(date -u +%u) # 1=Monday ... 7=Sunday
           HOUR=$(date -u +%H)
           MINUTE=$(date -u +%M)
           CURRENT_MINS=$(( 10#$HOUR * 60 + 10#$MINUTE ))
 
-          # Weekend check
+          echo "Evaluated UTC time: $(date -u +'%Y-%m-%d %H:%M UTC') (Day of week: $DOW)"
           if [ "$DOW" -gt 5 ]; then
-            echo "⏸️ Today is weekend (DOW: $DOW). European markets (LSE) are CLOSED."
-            echo "Exiting scheduled run immediately to conserve runner minutes."
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "ℹ️ Weekend execution (DOW: $DOW). European markets (LSE) are CLOSED."
+          elif [ "$CURRENT_MINS" -lt 470 ] || [ "$CURRENT_MINS" -gt 995 ]; then
+            echo "ℹ️ Execution outside regular trading hours (08:00 - 16:30 UTC / 09:00 - 17:30 CET)."
+          else
+            echo "✅ LSE Market is OPEN (08:00 - 16:30 UTC / 09:00 - 17:30 CET)."
           fi
-
-          # London Stock Exchange (LSE) is open 08:00 - 16:30 UTC (09:00 - 17:30 CET)
-          # Allowed execution window: 07:50 UTC (470 mins) to 16:35 UTC (995 mins)
-          if [ "$CURRENT_MINS" -lt 470 ] || [ "$CURRENT_MINS" -gt 995 ]; then
-            echo "⏸️ Current time is $(date -u +'%H:%M UTC') ($(date +'%H:%M %Z')). European markets (LSE) are CLOSED."
-            echo "LSE Trading Hours: 08:00 - 16:30 UTC / 09:00 - 17:30 CET."
-            echo "This scheduled run was delayed by GitHub Actions queue or fired off-hours."
-            echo "Exiting immediately to prevent running at night and conserve GitHub runner minutes."
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "✅ Market hours check passed: $(date -u +'%H:%M UTC') is within LSE trading window (07:50 - 16:35 UTC)."
           echo "should_run=true" >> "$GITHUB_OUTPUT"
 
       - name: 🐍 Set up Python 3.11
@@ -136,26 +111,32 @@ jobs:
           LIVE_DASHBOARD_PUBLIC_URL: ${{ env.TUNNEL_URL }}
         run: |
           # Calculate session duration
-          if [ "${{ github.event_name }}" = "schedule" ]; then
+          INPUT_DURATION="${{ inputs.duration_minutes }}"
+          
+          # If no custom duration is provided or default '270' is used (e.g. from Cloudflare Worker cron),
+          # dynamically calculate remaining market minutes until 16:35 UTC (capped at 270m).
+          if [ -z "$INPUT_DURATION" ] || [ "$INPUT_DURATION" = "270" ]; then
             HOUR=$(date -u +%H)
             MINUTE=$(date -u +%M)
             CURRENT_MINS=$(( 10#$HOUR * 60 + 10#$MINUTE ))
-            MARKET_CLOSE_MINS=995 # 16:35 UTC
+            MARKET_CLOSE_MINS=995 # 16:35 UTC (LSE close + 5m buffer)
             REMAINING_MINS=$(( MARKET_CLOSE_MINS - CURRENT_MINS ))
             
-            # Morning session cap: 270m, Afternoon cap: remaining mins until 16:35 UTC
-            if [ "$REMAINING_MINS" -le 0 ]; then
-              echo "Market already closed (past 16:35 UTC). Exiting."
-              exit 0
-            elif [ "$REMAINING_MINS" -lt 270 ]; then
-              DURATION="$REMAINING_MINS"
+            if [ "$CURRENT_MINS" -ge 470 ] && [ "$CURRENT_MINS" -le 995 ]; then
+              # Within regular market window (07:50 - 16:35 UTC)
+              if [ "$REMAINING_MINS" -lt 270 ]; then
+                DURATION="$REMAINING_MINS"
+              else
+                DURATION="270"
+              fi
+              echo "⏱️ Dynamically calculated session duration: ${DURATION}m (Market closes at 16:35 UTC / 17:35 CET)"
             else
               DURATION="270"
+              echo "⏱️ Outside regular market hours: defaulting session duration to ${DURATION}m"
             fi
-            echo "⏱️ Dynamically calculated session duration: ${DURATION}m (Market closes at 16:35 UTC / 17:35 CET)"
           else
-            DURATION="${{ inputs.duration_minutes || '270' }}"
-            echo "⏱️ Manual session duration: ${DURATION}m"
+            DURATION="$INPUT_DURATION"
+            echo "⏱️ Custom manual session duration: ${DURATION}m"
           fi
 
           export USE_LIVE="false"
