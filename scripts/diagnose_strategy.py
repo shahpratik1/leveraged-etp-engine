@@ -415,6 +415,7 @@ def run_in_memory_backtest(
     period: str = "1y",
     cost_bps: float = 45.0,
     universe: Optional[Any] = None,
+    strategy_filter: str = "both",
 ) -> List[TradeRecord]:
     """Execute backtest in-memory and return normalized TradeRecord list."""
     try:
@@ -470,7 +471,7 @@ def run_in_memory_backtest(
         target_vol=0.20,
         max_hold_days=4,
     )
-    result = engine.run(symbol=clean_sym, candles=candles, strategy_filter="both")
+    result = engine.run(symbol=clean_sym, candles=candles, strategy_filter=strategy_filter)
     simulated_trades = [asdict(t) if hasattr(t, "to_dict") else asdict(t) for t in result.trades]
 
     return [normalize_trade(t, cost_bps=cost_bps, universe=universe) for t in simulated_trades]
@@ -1024,6 +1025,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Historical period for in-memory backtest (e.g. 1y, 6m)",
     )
     parser.add_argument(
+        "--strategy-filter",
+        type=str,
+        default="both",
+        help="Strategy filter for in-memory backtest (directional_trend, both, all, etc.)",
+    )
+    parser.add_argument(
         "--cost-bps",
         type=float,
         default=45.0,
@@ -1095,6 +1102,7 @@ def main(args: Optional[Sequence[str]] = None) -> int:
                 period=opts.backtest_period,
                 cost_bps=opts.cost_bps,
                 universe=universe,
+                strategy_filter=opts.strategy_filter,
             )
         except Exception as exc:
             print(f"Error running in-memory backtest: {exc}", file=sys.stderr)

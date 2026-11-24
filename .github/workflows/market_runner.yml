@@ -5,6 +5,23 @@ on:
   # (07:55 UTC and 12:25 UTC Mon-Fri via https://leveraged-etp-engine.11shahpratik.workers.dev/)
   workflow_dispatch:
     inputs:
+      strategy:
+        description: 'Active Strategy to execute'
+        required: false
+        default: 'directional_trend'
+        type: choice
+        options:
+          - directional_trend
+          - vwap
+          - ml_alpha
+      use_live:
+        description: 'Execution mode: false (DEMO practice) or true (LIVE account)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
       duration_minutes:
         description: 'Duration in minutes to run the engine (defaults to 270 or remaining market minutes until 16:35 UTC)'
         required: false
@@ -139,12 +156,15 @@ jobs:
             echo "⏱️ Custom manual session duration: ${DURATION}m"
           fi
 
-          export USE_LIVE="false"
+          STRATEGY_CHOICE="${{ inputs.strategy || 'directional_trend' }}"
+          USE_LIVE_CHOICE="${{ inputs.use_live || 'false' }}"
+          export USE_LIVE="$USE_LIVE_CHOICE"
           
           echo "=========================================================="
           echo "🚀 Starting Quantitative Leveraged Trading Engine"
+          echo "🎯 Strategy: ${STRATEGY_CHOICE}"
           echo "⏱️ Duration: ${DURATION}m"
-          echo "⚙️ Mode: USE_LIVE=false (DEMO / PRACTICE ACCOUNT on demo.trading212.com)"
+          echo "⚙️ Mode: USE_LIVE=${USE_LIVE_CHOICE}"
           echo "🌐 Market Data Providers:"
           [ -n "${POLYGON_API_KEY}" ] && echo "  - Polygon.io: CONFIGURED (Key Detected)" || echo "  - Polygon.io: Not configured"
           [ -n "${FMP_API_KEY}" ] && echo "  - Financial Modeling Prep (FMP): CONFIGURED (Key Detected)" || echo "  - FMP: Not configured"
@@ -155,6 +175,7 @@ jobs:
           echo "=========================================================="
           
           python3 -m trading_system.orchestrator \
+            --strategy "$STRATEGY_CHOICE" \
             --interval 5 \
             --monitor-interval 10 \
             --dashboard-port 8080 \
@@ -166,12 +187,14 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Market Runner"
-          git pull origin main --rebase || true
+          CURRENT_BRANCH="${{ github.ref_name }}"
+          [ -z "$CURRENT_BRANCH" ] && CURRENT_BRANCH="main"
+          git pull origin "$CURRENT_BRANCH" --rebase || true
           git add active_trades.json trades.jsonl data/ 2>/dev/null || true
           if ! git diff --staged --quiet; then
             git commit -m "chore(state): persist active trades from market runner [skip ci]"
-            git push origin main
-            echo "✅ Successfully synced active trades and logs back to main."
+            git push origin "$CURRENT_BRANCH"
+            echo "✅ Successfully synced active trades and logs back to $CURRENT_BRANCH."
           else
             echo "ℹ️ No changes in active trades or logs to persist."
           fi

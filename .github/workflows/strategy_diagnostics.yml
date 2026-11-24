@@ -1,0 +1,105 @@
+name: Strategy Diagnostics & Edge Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: 'Underlying asset symbol to audit (e.g. QQQ, SPY, NVDA, AAPL)'
+        required: false
+        default: 'QQQ'
+        type: string
+      period:
+        description: 'Historical backtest period'
+        required: false
+        default: '1y'
+        type: choice
+        options:
+          - '6mo'
+          - '1y'
+          - '2y'
+          - '5y'
+      cost_bps:
+        description: 'Simulated LSE ETP round-trip friction in basis points (spread + FX)'
+        required: false
+        default: '45.0'
+        type: string
+      strategy_filter:
+        description: 'Strategy filter for backtest'
+        required: false
+        default: 'both'
+        type: choice
+        options:
+          - 'both'
+          - 'directional_trend'
+          - 'all'
+      analyze_live_trades:
+        description: 'Analyze recorded trades.jsonl if present instead of backtesting'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 📥 Check out repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r trading_system/requirements.txt
+
+      - name: 🧪 Run Strategy Diagnostics Unit Tests
+        run: |
+          python3 -m unittest tests/test_diagnose_strategy.py
+
+      - name: 📊 Run Strategy Diagnostics & Edge Audit
+        id: diagnostics
+        run: |
+          if [ "${{ inputs.analyze_live_trades }}" = "true" ] && [ -f "trades.jsonl" ]; then
+            echo "Running diagnostics on recorded live/paper trades (trades.jsonl)..."
+            python3 scripts/diagnose_strategy.py \
+              --trades trades.jsonl \
+              --cost-bps "${{ inputs.cost_bps }}" \
+              --json /tmp/diagnostics_report.json | tee /tmp/diagnostics_output.txt
+          else
+            echo "Running diagnostics on in-memory backtest (${{ inputs.symbol }}, ${{ inputs.period }})..."
+            python3 scripts/diagnose_strategy.py \
+              --backtest-symbol "${{ inputs.symbol }}" \
+              --backtest-period "${{ inputs.period }}" \
+              --strategy-filter "${{ inputs.strategy_filter }}" \
+              --cost-bps "${{ inputs.cost_bps }}" \
+              --json /tmp/diagnostics_report.json | tee /tmp/diagnostics_output.txt
+          fi
+
+      - name: 📝 Publish Diagnostics to Step Summary
+        if: always()
+        run: |
+          echo "## 📊 Strategy Diagnostics & Edge Audit Report" >> $GITHUB_STEP_SUMMARY
+          echo "Target: \`${{ inputs.symbol }}\` | Period: \`${{ inputs.period }}\` | Round-Trip Friction: \`${{ inputs.cost_bps }} bps\` | Filter: \`${{ inputs.strategy_filter }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f /tmp/diagnostics_output.txt ]; then
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            cat /tmp/diagnostics_output.txt >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: 📤 Upload Diagnostic Report Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-report-${{ inputs.symbol }}-${{ inputs.period }}
+          path: /tmp/diagnostics_report.json
+          if-no-files-found: ignore
