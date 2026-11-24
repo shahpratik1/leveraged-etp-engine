@@ -411,7 +411,7 @@ class Settings:
 
     # Trailing Stop Loss & Schmitt Hysteresis Ratcheting
     PURE_TSL_MODE: bool = True            # Pure 100% Trailing Stop Loss mode (no partial TP trims, lets winners run fully)
-    TSL_ATR_MULTIPLIER: float = 1.2
+    TSL_ATR_MULTIPLIER: float = 1.8       # Widened to 1.8 ATR to eliminate premature runner choke
     TSL_HYSTERESIS_ATR_MULT: float = 0.5  # Escape buffer past TP1 before elevating stop to TP1
     TSL_DECAY_DAY1_MULT: float = 2.20     # Day 1 session ATR trail multiplier
     TSL_DECAY_STEP_MULT: float = 0.35     # Per-session ATR trail compression step
@@ -426,7 +426,7 @@ class Settings:
     ENFORCE_INVERSE_INTRADAY_ONLY: bool = True
     FLATTEN_ALL_LEVERAGED_AT_SESSION_CLOSE: bool = False  # Set True to force 100% intraday liquidation of all 3x/5x ETPs at 16:20 UTC
     ENFORCE_LONG_BREAKEVEN_OVERNIGHT: bool = True
-    MIN_OVERNIGHT_PROFIT_CUSHION_PCT: float = 0.025      # 2.5% minimum profit cushion if long swing overnight is allowed
+    MIN_OVERNIGHT_PROFIT_CUSHION_PCT: float = 0.030      # 3.0% minimum profit cushion if long swing overnight is allowed (resists 45 bps friction)
     EARNINGS_BLACKOUT_HOURS: int = 24
     RATE_LIMIT_INTER_CALL_DELAY: float = 1.25  # seconds between Trading 212 API calls (strictly obeys 1 req/sec quota)
 

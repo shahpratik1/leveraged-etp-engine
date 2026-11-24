@@ -71,6 +71,7 @@ class BacktestResult:
     avg_trade_pnl: float
     avg_hold_days: float
     trades: List[SimulatedTrade] = field(default_factory=list)
+    time_in_cash_pct: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -431,6 +432,7 @@ class BacktestEngine:
         vwap20 = self._calculate_rolling_vwap(highs, lows, closes, volumes, 20)
         rsi3 = self._calculate_rsi(closes, 3)
         rsi7 = self._calculate_rsi(closes, 7)
+        rsi14 = self._calculate_rsi(closes, 14)
         atr14 = self._calculate_atr(highs, lows, closes, 14)
         vol20 = self._calculate_realized_vol(closes, 20)
         forecast_5d = self._calculate_rolling_nixtla_forecast(closes, 5)
@@ -442,6 +444,13 @@ class BacktestEngine:
 
         directional_strategy = DirectionalTrendStrategy()
         vwap_strategy = VWAPStrategy()
+        ml_alpha_strategy = None
+        if strategy_filter in ("ml_alpha", "all"):
+            try:
+                from trading_system.strategies.ml_alpha import MLAlphaStrategy
+                ml_alpha_strategy = MLAlphaStrategy()
+            except Exception:
+                ml_alpha_strategy = None
         if config_snapshot is not None:
             max_catalyst_risk = float(
                 read_config_value(config_snapshot, "SCREENER_MAX_CATALYST_RISK", 0.25)
@@ -458,9 +467,12 @@ class BacktestEngine:
         trades: List[SimulatedTrade] = []
         open_trades: List[Dict[str, Any]] = []
         trade_counter = 0
+        total_bars_simulated = 0
+        cash_bars = 0
 
         # Daily simulation loop
         for i in range(25, len(candles)):
+            total_bars_simulated += 1
             curr_date = dates[i]
             o = opens[i]
             h = highs[i]
@@ -535,7 +547,7 @@ class BacktestEngine:
                                 pos["tsl_status"] = "TSL_BREAKEVEN"
 
                         if peak_gain_pct >= 1.5 or pos["current_sl"] >= entry_p:
-                            dyn_tsl = pos["highest_price"] - (1.2 * curr_atr)
+                            dyn_tsl = pos["highest_price"] - (1.8 * curr_atr)
                             if dyn_tsl > pos["current_sl"]:
                                 pos["current_sl"] = dyn_tsl
                                 pos["tsl_status"] = "TSL_DYNAMIC"
@@ -552,7 +564,7 @@ class BacktestEngine:
                                 pos["tsl_status"] = "TSL_BREAKEVEN"
 
                         if trough_gain_pct >= 1.5 or pos["current_sl"] <= entry_p:
-                            dyn_tsl = pos["lowest_price"] + (1.2 * curr_atr)
+                            dyn_tsl = pos["lowest_price"] + (1.8 * curr_atr)
                             if dyn_tsl < pos["current_sl"]:
                                 pos["current_sl"] = dyn_tsl
                                 pos["tsl_status"] = "TSL_DYNAMIC"
@@ -730,6 +742,7 @@ class BacktestEngine:
                 curr_atr = atr14[i] or (curr_c * 0.02)
                 curr_r3 = rsi3[i]
                 curr_r7 = rsi7[i]
+                curr_r14 = rsi14[i]
                 curr_sma = sma200[i]
                 curr_vol = vol20[i] or 0.25
                 curr_forecast = forecast_5d[i]
@@ -754,6 +767,7 @@ class BacktestEngine:
                         # Short Rip confirmed by negative Nixtla forecast and bearish/neutral sentiment
                         elif (
                             curr_c < curr_sma
+                            and (ema50[i] is None or curr_c < ema50[i])
                             and curr_r3 >= 75.0
                             and curr_r7 >= 55.0
                             and (curr_forecast is not None and curr_forecast < 0.0)
@@ -781,6 +795,8 @@ class BacktestEngine:
                             and curr_c < curr_sma
                             and (curr_forecast is not None and curr_forecast < -0.5)
                             and (curr_sentiment is None or curr_sentiment <= 55.0)
+                            and (curr_r3 is None or curr_r3 >= 30.0)
+                            and (curr_r7 is None or curr_r7 >= 35.0)
                         ):
                             signal_dir = "SHORT"
                             strategy_name = "multi_factor"
@@ -803,6 +819,9 @@ class BacktestEngine:
                         "minus_di": minus_di14[i] if i < len(minus_di14) and minus_di14[i] is not None else 0.0,
                         "atr": curr_atr,
                         "realized_vol": curr_vol,
+                        "rsi3": curr_r3,
+                        "rsi7": curr_r7,
+                        "rsi14": curr_r14,
                     }
                     if candles[i].get("earnings_in_days") is not None:
                         bar_metrics["earnings_in_days"] = candles[i]["earnings_in_days"]
@@ -833,6 +852,9 @@ class BacktestEngine:
                         "minus_di": minus_di14[i] if i < len(minus_di14) and minus_di14[i] is not None else 0.0,
                         "atr": curr_atr,
                         "realized_vol": curr_vol,
+                        "rsi3": curr_r3,
+                        "rsi7": curr_r7,
+                        "rsi14": curr_r14,
                     }
                     if candles[i].get("earnings_in_days") is not None:
                         vwap_bar_metrics["earnings_in_days"] = candles[i]["earnings_in_days"]
@@ -843,6 +865,47 @@ class BacktestEngine:
                         signal_dir = vwap_sig.direction
                         strategy_name = "vwap"
 
+                # ML Alpha Strategy (Multi-Factor ONNX with Dual-Track Bear Shield)
+                if not signal_dir and strategy_filter in ("ml_alpha", "all"):
+                    if ml_alpha_strategy is None:
+                        try:
+                            from trading_system.strategies.ml_alpha import MLAlphaStrategy
+                            ml_alpha_strategy = MLAlphaStrategy()
+                        except Exception:
+                            ml_alpha_strategy = None
+                    if ml_alpha_strategy is not None:
+                        e20 = ema20[i] if i < len(ema20) and ema20[i] is not None else curr_c
+                        e50 = ema50[i] if i < len(ema50) and ema50[i] is not None else curr_c
+                        ml_bar_metrics: Dict[str, Any] = {
+                            "close": curr_c,
+                            "open": o,
+                            "high": h,
+                            "low": l,
+                            "volume": volumes[i],
+                            "bars": candles[: i + 1],
+                            "candles": candles[: i + 1],
+                            "date": curr_date,
+                            "sma200": curr_sma if curr_sma is not None else 0.0,
+                            "ema20": e20,
+                            "ema50": e50,
+                            "adx": adx14[i] if i < len(adx14) and adx14[i] is not None else 0.0,
+                            "plus_di": plus_di14[i] if i < len(plus_di14) and plus_di14[i] is not None else 0.0,
+                            "minus_di": minus_di14[i] if i < len(minus_di14) and minus_di14[i] is not None else 0.0,
+                            "atr": curr_atr,
+                            "realized_vol": curr_vol,
+                        }
+                        if candles[i].get("earnings_in_days") is not None:
+                            ml_bar_metrics["earnings_in_days"] = candles[i]["earnings_in_days"]
+                        try:
+                            ml_sig = ml_alpha_strategy.evaluate_candidate(
+                                symbol, ml_bar_metrics, config_snapshot=config_snapshot
+                            )
+                            if ml_sig and ml_sig.is_actionable and ml_sig.catalyst_risk <= max_catalyst_risk:
+                                signal_dir = ml_sig.direction
+                                strategy_name = "ml_alpha"
+                        except Exception as e:
+                            logger.debug("MLAlphaStrategy evaluation exception: %s", e)
+
                 # 3-RSI Mean Reversion (standalone or fallback if not multi_factor only)
                 if not signal_dir and strategy_filter in ("both", "3rsi"):
                     if curr_r3 is not None and curr_r7 is not None and curr_sma is not None:
@@ -850,8 +913,13 @@ class BacktestEngine:
                         if curr_c >= curr_sma and curr_r3 <= 22.0 and curr_r7 <= 42.0:
                             signal_dir = "LONG"
                             strategy_name = "3rsi_mean_reversion"
-                        # Short Rip: In downtrend (close < sma) and extreme overbought
-                        elif curr_c < curr_sma and curr_r3 >= 78.0 and curr_r7 >= 58.0:
+                        # Short Rip: In downtrend (close < sma and close < ema50) and extreme overbought
+                        elif (
+                            curr_c < curr_sma
+                            and (ema50[i] is None or curr_c < ema50[i])
+                            and curr_r3 >= 78.0
+                            and curr_r7 >= 58.0
+                        ):
                             signal_dir = "SHORT"
                             strategy_name = "3rsi_mean_reversion"
 
@@ -863,7 +931,13 @@ class BacktestEngine:
                     if curr_c > high_20d and curr_sma and curr_c > curr_sma:
                         signal_dir = "LONG"
                         strategy_name = "momentum"
-                    elif curr_c < low_20d and curr_sma and curr_c < curr_sma:
+                    elif (
+                        curr_c < low_20d
+                        and curr_sma
+                        and curr_c < curr_sma
+                        and (curr_r3 is None or curr_r3 >= 30.0)
+                        and (curr_r7 is None or curr_r7 >= 35.0)
+                    ):
                         signal_dir = "SHORT"
                         strategy_name = "momentum"
 
@@ -925,6 +999,9 @@ class BacktestEngine:
                         "realized_pnl": 0.0,
                         "hold_days": 0,
                     })
+
+            if not open_trades:
+                cash_bars += 1
 
             # Track end-of-day equity
             open_pnl = 0.0
@@ -1013,6 +1090,7 @@ class BacktestEngine:
 
         avg_pnl = sum(t.realized_pnl for t in trades) / total_count if total_count > 0 else 0.0
         avg_hold = sum(t.hold_days for t in trades) / total_count if total_count > 0 else 0.0
+        time_in_cash_pct = (cash_bars / total_bars_simulated * 100.0) if total_bars_simulated > 0 else 100.0
 
         return BacktestResult(
             symbol=symbol,
@@ -1032,6 +1110,7 @@ class BacktestEngine:
             avg_trade_pnl=round(avg_pnl, 2),
             avg_hold_days=round(avg_hold, 1),
             trades=trades,
+            time_in_cash_pct=round(time_in_cash_pct, 1),
         )
 
     def run_comparison(
@@ -1107,6 +1186,7 @@ def print_backtest_report(res: BacktestResult) -> None:
     print(f"  Sharpe Ratio:      {res.sharpe_ratio:.2f}")
     print(f"  Avg Trade PnL:     ${res.avg_trade_pnl:+.2f}")
     print(f"  Avg Holding Period: {res.avg_hold_days:.1f} days")
+    print(f"  Time in Cash:      {res.time_in_cash_pct:.1f}%")
     print(sub_sep)
     if res.trades:
         print("  Sample Trades:")
@@ -1134,6 +1214,7 @@ def print_comparison_report(comp: Dict[str, BacktestResult]) -> None:
         "multi_factor": "Multi-Factor (Nixtla/Sent)",
         "vwap": "VWAP Session Trend",
         "directional_trend": "Directional Trend",
+        "ml_alpha": "ML Alpha Strategy",
         "3rsi": "3-RSI Mean Reversion",
         "momentum": "Momentum Breakout",
     }
@@ -1156,6 +1237,7 @@ def print_comparison_report(comp: Dict[str, BacktestResult]) -> None:
     print(f"  {'Sharpe Ratio':<26} | {b.sharpe_ratio:>22.2f} | {m.sharpe_ratio:>22.2f}")
     print(f"  {'Avg Trade PnL':<26} | {f'${b.avg_trade_pnl:+.2f}':>22} | {f'${m.avg_trade_pnl:+.2f}':>22}")
     print(f"  {'Avg Holding Period':<26} | {f'{b.avg_hold_days:.1f} days':>22} | {f'{m.avg_hold_days:.1f} days':>22}")
+    print(f"  {'Time in Cash':<26} | {f'{b.time_in_cash_pct:.1f}%':>22} | {f'{m.time_in_cash_pct:.1f}%':>22}")
     print(sep)
 
 
@@ -1168,7 +1250,7 @@ def main() -> None:
     parser.add_argument(
         "--strategy",
         type=str,
-        choices=["3rsi", "momentum", "multi_factor", "directional_trend", "vwap", "both", "all"],
+        choices=["3rsi", "momentum", "multi_factor", "directional_trend", "vwap", "ml_alpha", "both", "all"],
         default="both",
         help="Strategy to test",
     )

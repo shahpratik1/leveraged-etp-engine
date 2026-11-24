@@ -167,7 +167,7 @@ class RiskManager:
         self.tp1_r = getattr(settings, "TP1_R_MULTIPLE", 1.5) if tp1_r is None else tp1_r
         self.tp2_r = getattr(settings, "TP2_R_MULTIPLE", 2.5) if tp2_r is None else tp2_r
         self.tp3_r = getattr(settings, "TP3_R_MULTIPLE", 3.5) if tp3_r is None else tp3_r
-        self.tsl_atr_multiplier = getattr(settings, "TSL_ATR_MULTIPLIER", 1.2) if tsl_atr_multiplier is None else tsl_atr_multiplier
+        self.tsl_atr_multiplier = getattr(settings, "TSL_ATR_MULTIPLIER", 1.8) if tsl_atr_multiplier is None else tsl_atr_multiplier
         self.tsl_hysteresis_atr_mult = getattr(settings, "TSL_HYSTERESIS_ATR_MULT", 0.5) if tsl_hysteresis_atr_mult is None else tsl_hysteresis_atr_mult
         self.tp1_trim_pct = getattr(settings, "TP1_TRIM_PCT", 0.50) if tp1_trim_pct is None else tp1_trim_pct
         self.tp2_trim_pct = getattr(settings, "TP2_TRIM_PCT", 0.25) if tp2_trim_pct is None else tp2_trim_pct

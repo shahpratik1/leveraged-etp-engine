@@ -274,12 +274,21 @@ class DirectionalTrendStrategy(BaseStrategy):
             )
 
         # ── 2. Bearish Regime & Dual-Track Short Execution ─────────
-        if is_dmi_bear and is_bear_slope and not macd_conflicts_bear:
+        rsi3_val = _safe_float(metrics.get("rsi3"), None)
+        rsi14_val = _safe_float(metrics.get("rsi14"), None)
+        is_oversold = (rsi3_val is not None and rsi3_val < 30.0) or (rsi14_val is not None and rsi14_val < 35.0)
+        is_intermediate_bear = (
+            (close < ema50 and ema20 <= ema50 and is_bear_slope)
+            if ema50 > 0.0
+            else (close < ema20 and is_bear_slope)
+        )
+
+        if is_dmi_bear and is_intermediate_bear and not is_oversold and not macd_conflicts_bear:
             bear_evidence.append(
                 f"Directional Polarity Bearish: -DI ({minus_di:.1f}) > +DI ({plus_di:.1f}) with ADX={adx:.1f} >= {min_adx:.1f}."
             )
             bear_evidence.append(
-                f"Trend Breakdown: Close ({close:.2f}) < 20 EMA ({ema20:.2f}) with downward slope ({slope_20:+.2f}%)."
+                f"Trend Breakdown Aligned: Close ({close:.2f}) < 50 EMA ({ema50:.2f}) with downward 20 EMA slope ({slope_20:+.2f}%)."
             )
 
             # Dual-track check: Index underlying vs Single Equity

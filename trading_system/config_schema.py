@@ -155,6 +155,8 @@ def is_env_only_key(key: str) -> bool:
     if not isinstance(key, str):
         return False
     upper = key.strip().upper()
+    if upper == "ML_MODEL_PATH":
+        return False
     if key.strip().lower() in _ENV_ONLY_LOWER or upper in ENV_ONLY_KEYS:
         return True
     return any(upper.endswith(suffix) for suffix in _SECRET_KEY_SUFFIXES)
@@ -228,7 +230,7 @@ CONFIG_SCHEMA: Tuple[ConfigParamSchema, ...] = (
         group="strategy",
         unit="",
         default="directional_trend",
-        allowed_values=("directional_trend", "vwap"),
+        allowed_values=("directional_trend", "vwap", "ml_alpha"),
         reload_mode="restart_required",
         revalidation_scope="abort_stale_scan",
         impact_hint="Selects the registered BaseStrategy implementation used across screening and backtests.",
@@ -832,7 +834,7 @@ CONFIG_SCHEMA: Tuple[ConfigParamSchema, ...] = (
         type="float",
         group="exit_tsl",
         unit="ATR",
-        default=1.2,
+        default=1.8,
         min=0.3,
         max=5.0,
         step=0.1,
@@ -1062,7 +1064,7 @@ CONFIG_SCHEMA: Tuple[ConfigParamSchema, ...] = (
         type="float",
         group="session",
         unit="fraction",
-        default=0.025,
+        default=0.030,
         min=0.0,
         max=0.25,
         step=0.005,
@@ -1365,6 +1367,91 @@ SCHEMA_BY_KEY: Dict[str, ConfigParamSchema] = {entry.key: entry for entry in CON
 TUNABLE_KEYS: Tuple[str, ...] = tuple(entry.key for entry in CONFIG_SCHEMA)
 SETTINGS_FIELD_NAMES: FrozenSet[str] = frozenset(f.name for f in dataclasses.fields(Settings))
 SETTINGS_FIELD_NAMES_LOWER: FrozenSet[str] = frozenset(name.lower() for name in SETTINGS_FIELD_NAMES)
+
+# ── Dynamic Parameter Schemas for ML Alpha Strategy ──────────────────────────
+ML_ALPHA_DYNAMIC_SCHEMAS: Tuple[ConfigParamSchema, ...] = (
+    _S(
+        key="ML_MIN_CONFIDENCE",
+        label="ML Min Confidence",
+        type="float",
+        group="strategy",
+        unit="prob",
+        default=0.58,
+        min=0.0,
+        max=1.0,
+        step=0.01,
+        reload_mode="hot_reload",
+        revalidation_scope="abort_stale_scan",
+        impact_hint="Minimum winning probability required for ML Alpha signal emission.",
+        gate_tags=("ml_alpha", "confidence_gate"),
+    ),
+    _S(
+        key="ML_MIN_EDGE_MARGIN",
+        label="ML Min Edge Margin",
+        type="float",
+        group="strategy",
+        unit="margin",
+        default=0.15,
+        min=0.0,
+        max=1.0,
+        step=0.01,
+        reload_mode="hot_reload",
+        revalidation_scope="abort_stale_scan",
+        impact_hint="Minimum edge margin over cash defense (p_winner - p_cash) for ML Alpha signals.",
+        gate_tags=("ml_alpha", "edge_margin_gate"),
+    ),
+    _S(
+        key="ML_MAX_VOL_DRAG_CUTOFF",
+        label="ML Max Vol Drag Cutoff",
+        type="float",
+        group="strategy",
+        unit="drag",
+        default=0.05,
+        min=0.0,
+        max=1.0,
+        step=0.005,
+        reload_mode="hot_reload",
+        revalidation_scope="abort_stale_scan",
+        impact_hint="Maximum volatility drag proxy cutoff for ML Alpha strategy.",
+        gate_tags=("ml_alpha", "vol_drag_gate"),
+    ),
+    _S(
+        key="ML_COOLDOWN_BARS",
+        label="ML Cooldown Bars",
+        type="int",
+        group="strategy",
+        unit="bars",
+        default=3,
+        min=0,
+        max=50,
+        step=1,
+        reload_mode="hot_reload",
+        revalidation_scope="abort_stale_scan",
+        impact_hint="Cooldown bars between signals for ML Alpha strategy.",
+        gate_tags=("ml_alpha", "cooldown_gate"),
+    ),
+    _S(
+        key="ML_MODEL_PATH",
+        label="ML Model Path",
+        type="str",
+        group="strategy",
+        unit="",
+        default="models/ml_alpha_v1.onnx",
+        reload_mode="restart_required",
+        revalidation_scope="abort_stale_scan",
+        impact_hint="Path to ONNX model artifact for ML Alpha strategy.",
+        gate_tags=("ml_alpha", "model_artifact"),
+    ),
+)
+
+ML_ALPHA_DYNAMIC_SCHEMAS_BY_KEY: Dict[str, ConfigParamSchema] = {
+    entry.key: entry for entry in ML_ALPHA_DYNAMIC_SCHEMAS
+}
+DYNAMIC_PARAMETER_SCHEMAS: Dict[str, ConfigParamSchema] = ML_ALPHA_DYNAMIC_SCHEMAS_BY_KEY
+ML_ALPHA_PARAM_SCHEMAS: Tuple[ConfigParamSchema, ...] = ML_ALPHA_DYNAMIC_SCHEMAS
+ML_ALPHA_DEFAULT_DYNAMIC_PARAMETERS: Dict[str, Any] = {
+    entry.key: entry.default for entry in ML_ALPHA_DYNAMIC_SCHEMAS
+}
 
 
 @dataclass(frozen=True)
@@ -1909,6 +1996,8 @@ def export_config_schema(dynamic_specs: Iterable[DynamicParameterSpec] = ()) -> 
         params.append(spec.to_dict())
     return {
         "parameters": params,
+        "dynamic_parameter_schemas": [s.to_dict() for s in ML_ALPHA_DYNAMIC_SCHEMAS],
+        "ml_alpha_parameter_schemas": [s.to_dict() for s in ML_ALPHA_DYNAMIC_SCHEMAS],
         "env_only_keys": sorted(ENV_ONLY_KEYS),
         "allowlisted_screener_metrics": sorted(ALLOWLISTED_SCREENER_METRICS),
         "allowed_gate_operators": list(ALLOWED_GATE_OPERATORS),

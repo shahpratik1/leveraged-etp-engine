@@ -329,7 +329,7 @@ class ConfigSnapshot:
 
     # --- exit_tsl (13) ---
     PURE_TSL_MODE: bool = True
-    TSL_ATR_MULTIPLIER: float = 1.2
+    TSL_ATR_MULTIPLIER: float = 1.8
     TSL_HYSTERESIS_ATR_MULT: float = 0.5
     TSL_DECAY_DAY1_MULT: float = 2.20
     TSL_DECAY_STEP_MULT: float = 0.35
@@ -347,7 +347,7 @@ class ConfigSnapshot:
     ENFORCE_INVERSE_INTRADAY_ONLY: bool = True
     FLATTEN_ALL_LEVERAGED_AT_SESSION_CLOSE: bool = False
     ENFORCE_LONG_BREAKEVEN_OVERNIGHT: bool = True
-    MIN_OVERNIGHT_PROFIT_CUSHION_PCT: float = 0.025
+    MIN_OVERNIGHT_PROFIT_CUSHION_PCT: float = 0.030
     EARNINGS_BLACKOUT_HOURS: int = 24
     RATE_LIMIT_INTER_CALL_DELAY: float = 1.25
 
