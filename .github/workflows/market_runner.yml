@@ -8,10 +8,9 @@ on:
       strategy:
         description: 'Active Strategy to execute'
         required: false
-        default: 'directional_trend'
+        default: 'vwap'
         type: choice
         options:
-          - directional_trend
           - vwap
           - ml_alpha
       use_live:
@@ -79,26 +78,6 @@ jobs:
           curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
           chmod +x /usr/local/bin/cloudflared
 
-      - name: 🔐 Prepare Dashboard Authentication Token
-        id: dash_auth
-        if: steps.market_check.outputs.should_run != 'false'
-        env:
-          CONFIGURED_TOKEN: ${{ secrets.DASHBOARD_AUTH_TOKEN || secrets.PANIC_FLATTEN_TOKEN }}
-        run: |
-          mkdir -p data
-          if [ -n "$CONFIGURED_TOKEN" ]; then
-            echo "Using user-configured DASHBOARD_AUTH_TOKEN secret."
-            echo "$CONFIGURED_TOKEN" > data/.dashboard_token
-            chmod 600 data/.dashboard_token
-            echo "has_custom_token=true" >> "$GITHUB_OUTPUT"
-          else
-            SESSION_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
-            echo "$SESSION_TOKEN" > data/.dashboard_token
-            chmod 600 data/.dashboard_token
-            echo "has_custom_token=false" >> "$GITHUB_OUTPUT"
-            echo "session_token=$SESSION_TOKEN" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: 🚀 Start Cloudflare Tunnel & Extract Live Dashboard URL
         id: tunnel
         if: steps.market_check.outputs.should_run != 'false'
@@ -120,15 +99,6 @@ jobs:
             echo "Access your live signals and control workbench anywhere (phone/desktop):" >> $GITHUB_STEP_SUMMARY
             echo "👉 **[Open Live Dashboard]($TUNNEL_URL)** (\`$TUNNEL_URL\`)" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### 🔐 Control Plane Access" >> $GITHUB_STEP_SUMMARY
-            echo "The dashboard is **Read-Only** by default for public monitoring." >> $GITHUB_STEP_SUMMARY
-            if [ "${{ steps.dash_auth.outputs.has_custom_token }}" = "true" ]; then
-              echo "To unlock mutating actions (Panic Flatten, manual exits, parameter staging), paste your configured \`DASHBOARD_AUTH_TOKEN\` secret." >> $GITHUB_STEP_SUMMARY
-            else
-              echo "To unlock mutating actions (Panic Flatten, manual exits, parameter staging), paste this session token into the **Unlock** modal:" >> $GITHUB_STEP_SUMMARY
-              echo "🔑 \`${{ steps.dash_auth.outputs.session_token }}\`" >> $GITHUB_STEP_SUMMARY
-            fi
-            echo "" >> $GITHUB_STEP_SUMMARY
             echo "=========================================================="
             echo "🎉 LIVE DASHBOARD ONLINE AT: $TUNNEL_URL"
             echo "=========================================================="
@@ -142,7 +112,6 @@ jobs:
         env:
           TRADING212_API_KEY: ${{ secrets.TRADING212_API_KEY }}
           TRADING212_API_SECRET: ${{ secrets.TRADING212_API_SECRET }}
-          DASHBOARD_AUTH_TOKEN: ${{ secrets.DASHBOARD_AUTH_TOKEN || secrets.PANIC_FLATTEN_TOKEN }}
           USE_LIVE: 'false'
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -186,7 +155,7 @@ jobs:
             echo "⏱️ Custom manual session duration: ${DURATION}m"
           fi
 
-          STRATEGY_CHOICE="${{ inputs.strategy || 'directional_trend' }}"
+          STRATEGY_CHOICE="${{ inputs.strategy || 'vwap' }}"
           USE_LIVE_CHOICE="${{ inputs.use_live || 'false' }}"
           export USE_LIVE="$USE_LIVE_CHOICE"
           

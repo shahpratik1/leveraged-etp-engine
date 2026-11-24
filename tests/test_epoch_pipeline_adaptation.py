@@ -37,6 +37,8 @@ def _make_bus(tmpdir: str) -> ConfigBus:
 def _bullish_metrics(
     *,
     close: float = 150.0,
+    vwap: float = 148.0,
+    vwap_dist_pct: float = 1.35,
     sma200: float = 130.0,
     ema20: float = 148.0,
     ema50: float = 142.0,
@@ -57,6 +59,8 @@ def _bullish_metrics(
 ) -> dict:
     return {
         "close": close,
+        "vwap": vwap,
+        "vwap_dist_pct": vwap_dist_pct,
         "sma200": sma200,
         "ema20": ema20,
         "ema50": ema50,
@@ -683,7 +687,7 @@ class TestStrategyImprovementAndBacktestEpoch(unittest.TestCase):
             }
             audit1 = agent.record_cycle_yield(0, low_adx_universe, config_snapshot=snap1)
             self.assertIsInstance(audit1, ImprovementAudit)
-            self.assertEqual(audit1.active_strategy, "directional_trend")
+            self.assertEqual(audit1.active_strategy, "vwap")
             self.assertEqual(audit1.config_epoch_id, snap1.config_epoch_id)
 
             agent.record_cycle_yield(0, low_adx_universe, config_snapshot=snap1)
@@ -716,7 +720,7 @@ class TestStrategyImprovementAndBacktestEpoch(unittest.TestCase):
                 config_snapshot=snap1,
             )
             self.assertEqual(sim_res["symbol"], "QQQ")
-            self.assertEqual(sim_res["strategy"], "directional_trend")
+            self.assertEqual(sim_res["strategy"], "vwap")
             self.assertIn("candidate_win_rate", sim_res)
 
     def test_backtest_engine_directional_trend_uses_wilder_adx_and_snapshot(self):

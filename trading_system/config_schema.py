@@ -139,6 +139,10 @@ ALLOWLISTED_SCREENER_METRICS: FrozenSet[str] = frozenset({
     "realized_vol",
     "high_20d",
     "earnings_in_days",
+    "vwap",
+    "vwap_dist_pct",
+    "vwap_upper_1std",
+    "vwap_lower_1std",
 })
 
 # Strategy / screener groups that can be deterministically simulated in Area 1 preview.
@@ -229,8 +233,8 @@ CONFIG_SCHEMA: Tuple[ConfigParamSchema, ...] = (
         type="str",
         group="strategy",
         unit="",
-        default="directional_trend",
-        allowed_values=("directional_trend", "vwap", "ml_alpha"),
+        default="vwap",
+        allowed_values=("vwap", "ml_alpha"),
         reload_mode="restart_required",
         revalidation_scope="abort_stale_scan",
         impact_hint="Selects the registered BaseStrategy implementation used across screening and backtests.",

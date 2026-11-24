@@ -1,0 +1,59 @@
+{
+  "model_version": "ml_alpha_v1",
+  "feature_names": [
+    "vol_drag_proxy",
+    "kaufman_er_10",
+    "kaufman_er_20",
+    "variance_ratio_5",
+    "atr_pct_rank_60",
+    "ema_spread_atr",
+    "ema20_slope_z",
+    "ret_10",
+    "donchian_pos_20",
+    "signed_dmi_strength",
+    "vol_zscore_20",
+    "range_expansion",
+    "gap_ratio",
+    "lse_time_remaining"
+  ],
+  "feature_hash": "eb050b642946c55b6884ba22e702dc7ad844ed43353f409b27d679674dfb1aaa",
+  "target_opset": 12,
+  "classes": [
+    0,
+    1,
+    2
+  ],
+  "class_labels": {
+    "0": "CASH_DEFENSE",
+    "1": "LONG",
+    "2": "SHORT"
+  },
+  "class_distribution": {
+    "0": 579,
+    "1": 717,
+    "2": 899
+  },
+  "cv_metrics": {
+    "mean_accuracy": 0.6475,
+    "mean_f1_macro": 0.635,
+    "mean_log_loss": 0.713,
+    "cv_accuracies": [
+      0.6219,
+      0.6301,
+      0.6548,
+      0.663,
+      0.6676
+    ],
+    "cv_f1s": [
+      0.6,
+      0.6148,
+      0.6462,
+      0.6499,
+      0.6642
+    ],
+    "parity_max_diff": 1.1249039588712151e-07,
+    "n_samples": 2195,
+    "n_splits": 5
+  },
+  "trained_at": "2026-11-21T08:55:29.024148+00:00"
+}

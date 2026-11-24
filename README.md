@@ -157,6 +157,48 @@ python3 -m trading_system.orchestrator --backtest --dry-run
 
 ---
 
+## 🧠 Machine Learning Alpha Strategy (`ml_alpha`)
+
+The system features an institutional LightGBM + ONNX gradient-boosted decision tree strategy with triple-barrier path-order labeling, strict zero-lookahead feature extraction, and dual-track bear shielding.
+
+### 1. Install ML Dependencies
+```bash
+pip install -r requirements-ml.txt
+```
+
+### 2. Train & Export ONNX Model
+Train an offline LightGBM multiclass classifier evaluated with purged walk-forward cross-validation and export the bit-for-bit parity ONNX graph:
+```bash
+# Synthetic CI/offline training (fast deterministic mode without API keys):
+./venv/bin/python3 scripts/train_ml_alpha.py --synthetic --output models/ml_alpha_v1.onnx
+
+# Or full multi-symbol historical training:
+./venv/bin/python3 scripts/train_ml_alpha.py --symbols QQQ,SPY,NVDA,AAPL --period 2y --output models/ml_alpha_v1.onnx
+```
+
+### 3. Backtest `ml_alpha` vs `directional_trend`
+Compare performance across Sharpe, Win Rate, Profit Factor, and Drawdown:
+```bash
+# Backtest ML Alpha on QQQ:
+python3 -m trading_system.orchestrator --backtest --backtest-strategy ml_alpha --backtest-symbol QQQ --backtest-period 1y
+
+# Benchmark comparison between ML Alpha and Directional Trend:
+python3 -m trading_system.orchestrator --backtest --backtest-strategy both --backtest-symbol QQQ --backtest-period 1y
+```
+
+### 4. Activate `ml_alpha` in Live / Paper Trading
+Set `ACTIVE_STRATEGY=ml_alpha` in `.env` or pass the runtime flag:
+```bash
+# Paper trading (dry-run) with ML Alpha:
+python3 -m trading_system.orchestrator --dry-run --strategy ml_alpha
+
+# Live automated trading engine with ML Alpha:
+python3 -m trading_system.orchestrator --strategy ml_alpha --dashboard-port 8080
+```
+Alternatively, hot-swap the active strategy on the fly via the Live Web Workbench dropdown or REST API (`POST /api/strategy/switch` with `{"strategy": "ml_alpha"}`).
+
+---
+
 ## ⚙️ Environment Configuration (`.env`)
 
 ```ini
@@ -219,6 +261,9 @@ python3 -m unittest tests/test_multi_provider.py
 
 # Run control plane and config bus tests
 python3 -m unittest tests/test_config_bus.py
+
+# Run ML Alpha feature, labeling, and inference tests
+python3 -m unittest tests/test_ml_alpha.py
 
 # Run opaque-box E2E test suite
 ./run_e2e_tests.sh

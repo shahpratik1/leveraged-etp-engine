@@ -9,6 +9,10 @@ yfinance>=0.2.30
 python-dotenv>=1.0.0
 pydantic>=2.0.0
 
+# ── Inference Engine (Lightweight CPU) ───────────────────────────
+onnxruntime>=1.16.0
+
+
 
 # ── Optional Multi-Agent / LLM Framework (enabled when API keys set) ──
 # openai>=1.0.0

@@ -58,7 +58,7 @@ class ImprovementAudit:
     regime: str = "NORMAL"  # "LOW_VOL_CHOP", "NORMAL", "HIGH_VOL_TREND", "CRISIS"
     recommendations: List[str] = field(default_factory=list)
     action_taken: Optional[str] = None
-    active_strategy: str = "directional_trend"
+    active_strategy: str = "vwap"
     config_epoch_id: Optional[str] = None
     parameter_recommendations: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -173,7 +173,7 @@ class StrategyImprovementAgent:
         now_str = datetime.now(timezone.utc).isoformat()
         source: Any = config_snapshot if config_snapshot is not None else settings
         epoch_id = read_config_value(config_snapshot, "config_epoch_id", None) if config_snapshot is not None else None
-        active_strategy = str(read_config_value(source, "ACTIVE_STRATEGY", "directional_trend"))
+        active_strategy = str(read_config_value(source, "ACTIVE_STRATEGY", "vwap"))
         current_min_adx = float(read_config_value(source, "MIN_ADX_TREND", 18.0))
         current_max_cat = float(read_config_value(source, "SCREENER_MAX_CATALYST_RISK", 0.25))
 
@@ -336,9 +336,14 @@ class StrategyImprovementAgent:
         try:
             from trading_system.backtest.engine import BacktestEngine
             from trading_system.data.candle_db import CandleDatabase
-            from trading_system.strategies.directional_trend import DirectionalTrendStrategy
+            from trading_system.strategies.registry import StrategyRegistry
 
             source: Any = config_snapshot if config_snapshot is not None else settings
+            active_strat = str(read_config_value(source, "ACTIVE_STRATEGY", "vwap"))
+            try:
+                strategy = StrategyRegistry.get(active_strat)
+            except Exception:
+                strategy = StrategyRegistry.get("vwap")
             min_adx = float(
                 candidate_adx_threshold
                 if candidate_adx_threshold is not None
@@ -359,7 +364,7 @@ class StrategyImprovementAgent:
                 return {
                     "verified": False,
                     "symbol": symbol,
-                    "strategy": "directional_trend",
+                    "strategy": active_strat,
                     "reason": "Insufficient historical candles for backtesting",
                     "candidate_win_rate": 0.0,
                     "profit_factor": 0.0,
@@ -368,39 +373,60 @@ class StrategyImprovementAgent:
             highs = [float(c["high"]) for c in candles]
             lows = [float(c["low"]) for c in candles]
             closes = [float(c["close"]) for c in candles]
+            volumes = [float(c.get("volume", 1.0) or 1.0) for c in candles]
             sma200 = BacktestEngine._calculate_sma(closes, 200)
             ema20 = BacktestEngine._calculate_ema(closes, 20)
             ema50 = BacktestEngine._calculate_ema(closes, 50)
             adx14, pdi14, mdi14 = BacktestEngine._calculate_wilder_adx(highs, lows, closes, 14)
+            vwap20 = BacktestEngine._calculate_rolling_vwap(highs, lows, closes, volumes, 20)
+            atr14 = BacktestEngine._calculate_atr(highs, lows, closes, 14)
+            vol20 = BacktestEngine._calculate_realized_vol(closes, 20)
 
             eval_snapshot = _SnapshotProxy(
                 source,
                 MIN_ADX_TREND=min_adx,
                 SCREENER_MAX_CATALYST_RISK=max_cat_risk,
             )
-            strategy = DirectionalTrendStrategy(
-                min_adx_trend=min_adx, max_catalyst_risk=max_cat_risk
-            )
+            if active_strat == "vwap":
+                from trading_system.strategies.vwap import VWAPStrategy
+                strategy = VWAPStrategy(max_catalyst_risk=max_cat_risk)
+            else:
+                try:
+                    from trading_system.strategies.directional_trend import DirectionalTrendStrategy
+                    strategy = DirectionalTrendStrategy(
+                        min_adx_trend=min_adx, max_catalyst_risk=max_cat_risk
+                    )
+                except Exception:
+                    strategy = StrategyRegistry.get(active_strat)
 
             actionable_bars = 0
             latest_dir = "NEUTRAL"
             for idx in range(20, len(candles)):
-                e20 = ema20[idx] if ema20[idx] is not None else closes[idx]
-                e50 = ema50[idx] if ema50[idx] is not None else closes[idx]
+                curr_c = closes[idx]
+                curr_vwap = vwap20[idx] if (vwap20 and vwap20[idx] is not None) else curr_c
+                vwap_dist = ((curr_c - curr_vwap) / curr_vwap) * 100.0 if curr_vwap > 0 else 0.0
+                e20 = ema20[idx] if ema20[idx] is not None else curr_c
+                e50 = ema50[idx] if ema50[idx] is not None else curr_c
                 slope_5d = (
                     ((ema20[idx] - ema20[idx - 5]) / ema20[idx - 5]) * 100.0
                     if idx >= 5 and ema20[idx] is not None and ema20[idx - 5] is not None and ema20[idx - 5] > 0
                     else None
                 )
                 bar_metrics = {
-                    "close": closes[idx],
+                    "close": curr_c,
+                    "vwap": curr_vwap,
+                    "vwap_dist_pct": vwap_dist,
                     "sma200": sma200[idx] if sma200[idx] is not None else 0.0,
                     "ema20": e20,
                     "ema50": e50,
+                    "ema20_daily": e20,
+                    "ema50_daily": e50,
                     "ema20_slope_5d": slope_5d,
                     "adx": adx14[idx] if adx14[idx] is not None else 0.0,
                     "plus_di": pdi14[idx] if pdi14[idx] is not None else 0.0,
                     "minus_di": mdi14[idx] if mdi14[idx] is not None else 0.0,
+                    "atr": atr14[idx] or (curr_c * 0.02),
+                    "realized_vol": vol20[idx] or 0.25,
                 }
                 sig = strategy.evaluate_candidate(symbol, bar_metrics, config_snapshot=eval_snapshot)
                 if sig.is_actionable and sig.catalyst_risk <= max_cat_risk:
@@ -412,7 +438,7 @@ class StrategyImprovementAgent:
             result = engine.run(
                 symbol,
                 candles,
-                strategy_filter="directional_trend",
+                strategy_filter=active_strat,
                 config_snapshot=eval_snapshot,
             )
 
@@ -424,7 +450,7 @@ class StrategyImprovementAgent:
             return {
                 "verified": verified,
                 "symbol": symbol,
-                "strategy": "directional_trend",
+                "strategy": active_strat,
                 "adx_threshold": min_adx,
                 "max_catalyst_risk": max_cat_risk,
                 "latest_adx": round(float(latest_adx), 2),
@@ -441,7 +467,7 @@ class StrategyImprovementAgent:
             return {
                 "verified": False,
                 "symbol": symbol,
-                "strategy": "directional_trend",
+                "strategy": active_strat,
                 "reason": str(exc),
                 "candidate_win_rate": 0.0,
                 "profit_factor": 0.0,

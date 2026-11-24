@@ -76,5 +76,6 @@ class StrategyRegistry:
         try:
             import trading_system.strategies.directional_trend  # noqa: F401
             import trading_system.strategies.vwap  # noqa: F401
+            import trading_system.strategies.ml_alpha  # noqa: F401
         except ImportError:
             pass

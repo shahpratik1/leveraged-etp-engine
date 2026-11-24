@@ -1904,7 +1904,7 @@ class Orchestrator:
         metrics = candidate.metrics
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         direction = "LONG" if candidate.bias == "bullish" else "SHORT"
-        strategy_type = getattr(candidate, "strategy_type", "directional_trend")
+        strategy_type = getattr(candidate, "strategy_type", getattr(snap, "ACTIVE_STRATEGY", "vwap"))
         if getattr(candidate, "strategy_signal", None) is not None:
             metrics["strategy_signal"] = candidate.strategy_signal
         if not getattr(candidate, "config_epoch_id", None):
@@ -2457,7 +2457,7 @@ class Orchestrator:
             "metrics": metrics,
             "debate_outcome": debate_stub,
             "account_equity": account_equity,
-            "strategy_type": getattr(cand, "strategy_type", "directional_trend"),
+            "strategy_type": getattr(cand, "strategy_type", getattr(target_snap, "ACTIVE_STRATEGY", "vwap")),
             "leverage": int(getattr(card, "leverage", 3) or 3),
         }
         if self._supports_kwarg(gen_fn, "config_snapshot"):
@@ -2795,7 +2795,7 @@ class Orchestrator:
             return []
 
         # Step 3: Strategy Screen (Screening under cycle_snapshot)
-        active_strat = getattr(cycle_snapshot, "ACTIVE_STRATEGY", "directional_trend")
+        active_strat = getattr(cycle_snapshot, "ACTIVE_STRATEGY", "vwap")
         strat_desc = "VWAP session trend rules" if active_strat == "vwap" else f"{active_strat} momentum rules"
         self._broadcast_pipeline_progress(
             3, "Strategy Screen", f"Screening universe indicators against {strat_desc}.",
@@ -3370,11 +3370,21 @@ def main() -> None:
     parser.add_argument("--duration-minutes", type=int, default=0, help="Optional duration in minutes to run before clean shutdown (default: 0 = run indefinitely)")
     parser.add_argument("--open-browser", action="store_true", help="Automatically open dashboard in default browser on startup")
     parser.add_argument("--test-notifications", action="store_true", help="Dispatch test alerts for all 7 event types (BUY, SELL, TP1, TP2, TP3, SL, TSL)")
+    parser.add_argument(
+        "--strategy",
+        type=str,
+        choices=["vwap", "ml_alpha"],
+        default=getattr(settings, "ACTIVE_STRATEGY", "vwap"),
+        help="Pluggable trading strategy to execute (default: vwap)",
+    )
     parser.add_argument("--backtest", action="store_true", help="Run historical strategy backtest simulator and benchmark report")
     parser.add_argument("--backtest-symbol", type=str, default="QQQ", help="Underlying asset symbol to backtest (default: QQQ)")
     parser.add_argument("--backtest-period", type=str, default="1y", help="Historical backtest period (default: 1y)")
-    parser.add_argument("--backtest-strategy", type=str, choices=["directional_trend", "both"], default="directional_trend", help="Strategy filter to backtest (default: directional_trend)")
+    parser.add_argument("--backtest-strategy", type=str, choices=["vwap", "ml_alpha", "both", "all"], default="vwap", help="Strategy filter to backtest (default: vwap)")
     args = parser.parse_args()
+
+    if getattr(args, "strategy", None):
+        setattr(settings, "ACTIVE_STRATEGY", args.strategy)
 
     # Historical backtesting route
     if args.backtest:

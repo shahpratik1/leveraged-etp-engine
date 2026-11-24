@@ -395,8 +395,8 @@ class Settings:
     HIGH_VOL_MAX_ATR_SPIKE_RATIO: float = 1.50
     FALLBACK_SCREENER_MIN_ADX: float = 20.0
 
-    # Quantitative Strategy (Directional Trend with Multi-Timeframe Gating & Dual-Track Short Execution)
-    ACTIVE_STRATEGY: str = "directional_trend"
+    # Quantitative Strategy (VWAP Session Trend with Multi-Timeframe Gating & Dual-Track Short Execution)
+    ACTIVE_STRATEGY: str = "vwap"
     STRATEGY_EXCEPTIONAL_ADX: float = 25.0
     MIN_EMA20_SLOPE_PCT: float = 0.0
     ENTRY_EARNINGS_BLACKOUT_DAYS: float = 2.0

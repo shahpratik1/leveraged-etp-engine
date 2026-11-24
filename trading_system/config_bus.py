@@ -282,7 +282,7 @@ class ConfigSnapshot:
     """Immutable point-in-time configuration snapshot returned by ConfigBus."""
 
     # --- strategy (11) ---
-    ACTIVE_STRATEGY: str = "directional_trend"
+    ACTIVE_STRATEGY: str = "vwap"
     MIN_ADX_TREND: float = 18.0
     STRATEGY_EXCEPTIONAL_ADX: float = 25.0
     MIN_EMA20_SLOPE_PCT: float = 0.0

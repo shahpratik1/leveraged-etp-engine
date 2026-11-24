@@ -879,7 +879,7 @@
             onChange: (e) => stageParameterValue("ACTIVE_STRATEGY", e.target.value),
           },
           el("option", { value: "vwap", selected: stratVal === "vwap", text: "VWAP Session Trend Engine (Intraday Breakout)" }),
-          el("option", { value: "directional_trend", selected: stratVal === "directional_trend", text: "Directional Trend Engine (EMA / ADX / RSI)" })
+          el("option", { value: "ml_alpha", selected: stratVal === "ml_alpha", text: "ML Alpha Engine (Multi-Factor ONNX)" })
         );
         coreGrid.appendChild(
           el(
@@ -3975,7 +3975,7 @@
     }
     clearNode(card);
 
-    const activeStrat = getEffectiveConfigValue("ACTIVE_STRATEGY") || "directional_trend";
+    const activeStrat = getEffectiveConfigValue("ACTIVE_STRATEGY") || "vwap";
     const currentRisk = Number(getEffectiveConfigValue("MAX_RISK_PER_TRADE") || 0.015);
     const currentSlMult = Number(getEffectiveConfigValue("ATR_SL_MULTIPLIER") || 2.2);
     const currentCutoff = String(getEffectiveConfigValue("SESSION_CLOSE_CUTOFF_UTC") || "16:20").trim();
@@ -4024,8 +4024,8 @@
           renderQuickControls(container, readOnly);
         },
       },
-      el("option", { value: "directional_trend", selected: activeStrat === "directional_trend", text: "Directional Trend (Momentum Breakout)" }),
       el("option", { value: "vwap", selected: activeStrat === "vwap", text: "VWAP Session Trend (Breakout & Volume)" }),
+      el("option", { value: "ml_alpha", selected: activeStrat === "ml_alpha", text: "ML Alpha Engine (Multi-Factor ONNX)" }),
       el("option", { value: "supertrend", selected: activeStrat === "supertrend", text: "Supertrend (Experimental)" })
     );
     grid.appendChild(

@@ -26,11 +26,11 @@ on:
       strategy_filter:
         description: 'Strategy filter for backtest'
         required: false
-        default: 'both'
+        default: 'vwap'
         type: choice
         options:
+          - 'vwap'
           - 'both'
-          - 'directional_trend'
           - 'all'
       analyze_live_trades:
         description: 'Analyze recorded trades.jsonl if present instead of backtesting'

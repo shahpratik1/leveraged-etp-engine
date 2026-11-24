@@ -215,6 +215,29 @@ class TestBacktestEngine(unittest.TestCase):
         self.assertGreater(comp["vwap"].total_trades, 0)
         self.assertGreater(comp["directional_trend"].total_trades, 0)
 
+    def test_ml_alpha_strategy_simulation_and_time_in_cash(self):
+        """Verify running backtest with ml_alpha filter and time-in-cash percentage."""
+        candles = generate_synthetic_candles("QQQ", count=160)
+        res = self.engine.run(symbol="QQQ", candles=candles, strategy_filter="ml_alpha")
+        self.assertIsInstance(res, BacktestResult)
+        self.assertGreaterEqual(res.time_in_cash_pct, 0.0)
+        self.assertLessEqual(res.time_in_cash_pct, 100.0)
+        res_dict = res.to_dict()
+        self.assertIn("time_in_cash_pct", res_dict)
+
+    def test_run_comparison_directional_and_ml_alpha(self):
+        """Verify comparison between directional_trend and ml_alpha."""
+        candles = generate_synthetic_candles("QQQ", count=160)
+        comp = self.engine.run_comparison(
+            symbol="QQQ", candles=candles, strategy_a="directional_trend", strategy_b="ml_alpha"
+        )
+        self.assertIn("directional_trend", comp)
+        self.assertIn("ml_alpha", comp)
+        self.assertIsInstance(comp["directional_trend"], BacktestResult)
+        self.assertIsInstance(comp["ml_alpha"], BacktestResult)
+        self.assertGreaterEqual(comp["directional_trend"].time_in_cash_pct, 0.0)
+        self.assertGreaterEqual(comp["ml_alpha"].time_in_cash_pct, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

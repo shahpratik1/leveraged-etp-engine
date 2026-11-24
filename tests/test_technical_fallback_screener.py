@@ -16,9 +16,11 @@ class TestTechnicalFallbackScreener(unittest.TestCase):
         self.screener = TechnicalFallbackScreener(top_n=5, min_adx=20.0)
 
     def test_bullish_signal_generation(self) -> None:
-        """Bullish signal is triggered when RSI < 65, ADX >= 20, close > EMA20, MACD > signal."""
+        """Bullish signal is triggered when price holds above session VWAP with confirmed trend."""
         metrics = {
             "close": 150.0,
+            "vwap": 148.0,
+            "vwap_dist_pct": 1.35,
             "ema20": 145.0,
             "rsi": 52.0,
             "adx": 28.5,
@@ -35,9 +37,11 @@ class TestTechnicalFallbackScreener(unittest.TestCase):
         self.assertGreater(r.overall_confidence, 0.7)
 
     def test_bearish_signal_generation(self) -> None:
-        """Bearish signal is triggered for benchmark indices when RSI > 35, ADX >= 20, close < EMA20."""
+        """Bearish signal is triggered for benchmark indices when price breaks below session VWAP."""
         metrics = {
             "close": 90.0,
+            "vwap": 91.5,
+            "vwap_dist_pct": -1.64,
             "ema20": 98.0,
             "rsi": 42.0,
             "adx": 34.0,

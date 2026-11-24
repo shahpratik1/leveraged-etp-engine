@@ -238,7 +238,7 @@ class ScreenerResult:
     setup_confidence: float = 0.85
     catalyst_risk: float = 0.0
     overall_confidence: float = 0.85
-    strategy_type: str = "directional_trend"
+    strategy_type: str = "vwap"
     metrics: Dict[str, Any] = field(default_factory=dict)
     state_document: str = ""
     market_regime: str = "TRENDING_BREAKOUT"
@@ -352,17 +352,17 @@ class LayaScreener:
         # Resolve active pluggable trading strategy
         from trading_system.strategies.registry import StrategyRegistry
 
-        active_name = strategy_name or getattr(settings, "ACTIVE_STRATEGY", "directional_trend")
+        active_name = strategy_name or getattr(settings, "ACTIVE_STRATEGY", "vwap")
         self._init_strategy_name = active_name
         try:
             self.strategy = StrategyRegistry.get(active_name)
         except Exception as exc:
             logger.warning(
-                "Failed to initialize strategy '%s' (%s), falling back to directional_trend",
+                "Failed to initialize strategy '%s' (%s), falling back to vwap",
                 active_name,
                 exc,
             )
-            self.strategy = StrategyRegistry.get("directional_trend")
+            self.strategy = StrategyRegistry.get("vwap")
 
         # ----- Laya question bank -----
         self.questions: Dict[str, Dict[str, Any]] = {
@@ -868,7 +868,11 @@ class TechnicalFallbackScreener:
             self.strategy = strategy
         else:
             from trading_system.strategies.registry import StrategyRegistry
-            self.strategy = StrategyRegistry.get("directional_trend")
+            active_name = getattr(settings, "ACTIVE_STRATEGY", "vwap")
+            try:
+                self.strategy = StrategyRegistry.get(active_name)
+            except Exception:
+                self.strategy = StrategyRegistry.get("vwap")
 
     def _resolve_params(
         self, config_snapshot: Optional[ConfigSnapshot] = None
@@ -1267,10 +1271,14 @@ def simulate_screener_gate_impact(
     snapshot: ConfigSnapshot,
 ) -> Dict[str, Any]:
     """Offline deterministic simulation of screener and strategy impact for diff previews (A-ASM2)."""
-    from trading_system.strategies.directional_trend import DirectionalTrendStrategy
+    from trading_system.strategies.registry import StrategyRegistry
 
     sanitized_universe = extract_compact_indicators(compact_universe_indicators)
-    strategy = DirectionalTrendStrategy()
+    active_strat = str(read_config_value(snapshot, "ACTIVE_STRATEGY", "vwap"))
+    try:
+        strategy = StrategyRegistry.get(active_strat)
+    except Exception:
+        strategy = StrategyRegistry.get("vwap")
     epoch_id = read_config_value(snapshot, "config_epoch_id", None)
 
     min_setup_score = str(read_config_value(snapshot, "SCREENER_MIN_SETUP_SCORE", "favorable")).lower()

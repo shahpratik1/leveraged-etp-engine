@@ -415,7 +415,7 @@ def run_in_memory_backtest(
     period: str = "1y",
     cost_bps: float = 45.0,
     universe: Optional[Any] = None,
-    strategy_filter: str = "both",
+    strategy_filter: str = "vwap",
 ) -> List[TradeRecord]:
     """Execute backtest in-memory and return normalized TradeRecord list."""
     try:
@@ -1027,8 +1027,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--strategy-filter",
         type=str,
-        default="both",
-        help="Strategy filter for in-memory backtest (directional_trend, both, all, etc.)",
+        default="vwap",
+        help="Strategy filter for in-memory backtest (vwap, both, all, etc.)",
     )
     parser.add_argument(
         "--cost-bps",

@@ -80,6 +80,7 @@ class VWAPStrategy(BaseStrategy):
             broad_set = set(raw_indices) if raw_indices is not None else self.broad_indices
             return {
                 "config_epoch_id": read_config_value(config_snapshot, "config_epoch_id", None),
+                "min_adx_trend": float(read_config_value(config_snapshot, "MIN_ADX_TREND", 18.0)),
                 "min_vwap_dist_pct": float(read_config_value(config_snapshot, "MIN_VWAP_DIST_PCT", 0.1)),
                 "max_vwap_dist_pct": float(read_config_value(config_snapshot, "MAX_VWAP_DIST_PCT", 3.5)),
                 "max_catalyst_risk": float(read_config_value(config_snapshot, "SCREENER_MAX_CATALYST_RISK", 0.25)),
@@ -92,6 +93,7 @@ class VWAPStrategy(BaseStrategy):
 
         return {
             "config_epoch_id": None,
+            "min_adx_trend": float(getattr(settings, "MIN_ADX_TREND", 18.0)),
             "min_vwap_dist_pct": (
                 self.min_vwap_dist_pct
                 if self._explicit_min_dist
@@ -212,6 +214,17 @@ class VWAPStrategy(BaseStrategy):
                 "threshold": blackout_days,
                 "label": "Earnings Blackout",
                 "reason": f"Earnings in {earnings_val:.1f}d within {blackout_days:.0f}d window",
+            })
+
+        min_adx: float = params.get("min_adx_trend", 18.0)
+        if adx < min_adx:
+            gate_rejections.append({
+                "gate_id": "trend_filter:MIN_ADX_TREND",
+                "param_keys": ["MIN_ADX_TREND"],
+                "observed": adx,
+                "threshold": min_adx,
+                "label": "Minimum ADX Trend Strength",
+                "reason": f"ADX {adx:.1f} below minimum {min_adx:.1f}",
             })
 
         # Dynamic screener metric gates

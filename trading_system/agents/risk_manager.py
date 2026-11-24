@@ -68,7 +68,7 @@ class DecisionCard:
     risk_pct_of_equity: float           # Actual risk as % of equity
     conviction_score: float
     rationale: str                      # Brief text explaining the decision
-    strategy_type: str = "directional_trend"
+    strategy_type: str = "vwap"
     leverage: int = 3                   # 3 or 5 (ETP leverage multiplier)
     earnings_in_days: Optional[float] = None
     realized_vol: Optional[float] = None
@@ -643,7 +643,7 @@ class RiskManager:
         metrics: Dict[str, Any],
         debate_outcome: Optional[Any] = None,
         account_equity: float = 0.0,
-        strategy_type: str = "directional_trend",
+        strategy_type: str = "vwap",
         leverage: Optional[int] = None,
         config_snapshot: Optional[ConfigSnapshot] = None,
     ) -> DecisionCard:

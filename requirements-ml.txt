@@ -1,0 +1,9 @@
+# Offline ML Training & ONNX Export Dependencies
+# ===============================================
+# Run: pip install -r requirements-ml.txt
+
+-r trading_system/requirements.txt
+lightgbm>=4.0.0
+scikit-learn>=1.3.0
+onnxmltools>=1.11.0
+onnx>=1.14.0
