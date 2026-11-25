@@ -72,39 +72,166 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r trading_system/requirements.txt
 
-      - name: 🌐 Install Cloudflare Quick Tunnel
+      - name: 🔐 Prepare Dashboard Authentication Token
+        id: dash_auth
+        if: steps.market_check.outputs.should_run != 'false'
+        env:
+          CONFIGURED_TOKEN: ${{ secrets.DASHBOARD_AUTH_TOKEN || secrets.PANIC_FLATTEN_TOKEN }}
+        run: |
+          mkdir -p data
+          if [ -n "$CONFIGURED_TOKEN" ]; then
+            echo "Using user-configured DASHBOARD_AUTH_TOKEN secret."
+            printf '%s\n' "$CONFIGURED_TOKEN" > data/.dashboard_token
+            chmod 600 data/.dashboard_token
+            echo "has_custom_token=true" >> "$GITHUB_OUTPUT"
+          else
+            SESSION_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+            printf '%s\n' "$SESSION_TOKEN" > data/.dashboard_token
+            chmod 600 data/.dashboard_token
+            echo "has_custom_token=false" >> "$GITHUB_OUTPUT"
+            echo "session_token=$SESSION_TOKEN" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 🌐 Install Cloudflare Tunnel
         if: steps.market_check.outputs.should_run != 'false'
         run: |
-          curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
-          chmod +x /usr/local/bin/cloudflared
+          if curl -fsSL --retry 3 --retry-delay 2 \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            -o /usr/local/bin/cloudflared; then
+            chmod +x /usr/local/bin/cloudflared
+            /usr/local/bin/cloudflared --version || true
+          else
+            echo "⚠️ Failed to download cloudflared binary; SSH fallback tunnel will be used if needed."
+          fi
 
-      - name: 🚀 Start Cloudflare Tunnel & Extract Live Dashboard URL
+      - name: 🚀 Start Live Dashboard Tunnel & Publish Access Details
         id: tunnel
         if: steps.market_check.outputs.should_run != 'false'
+        env:
+          CF_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+          CF_TUNNEL_URL: ${{ secrets.CLOUDFLARE_TUNNEL_URL }}
+          IS_PRIVATE_REPO: ${{ github.event.repository.private }}
         run: |
-          nohup cloudflared tunnel --url http://127.0.0.1:8080 > /tmp/cloudflared.log 2>&1 &
-          sleep 5
           TUNNEL_URL=""
-          for i in {1..12}; do
-            TUNNEL_URL=$(grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare\.com' /tmp/cloudflared.log | head -n 1 || true)
-            if [ -n "$TUNNEL_URL" ]; then
-              break
+          TUNNEL_PROVIDER=""
+
+          # Tier 1: Persistent Named Cloudflare Tunnel (when configured via GitHub Secrets)
+          if [ -n "${CF_TUNNEL_TOKEN:-}" ] && [ -x /usr/local/bin/cloudflared ]; then
+            echo "Starting configured Named Cloudflare Tunnel..."
+            rm -f /tmp/cloudflared.log
+            setsid /usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 run --token "$CF_TUNNEL_TOKEN" </dev/null >/tmp/cloudflared.log 2>&1 &
+            CF_PID=$!
+            sleep 5
+            if kill -0 "$CF_PID" 2>/dev/null && [ -n "${CF_TUNNEL_URL:-}" ]; then
+              TUNNEL_URL="$CF_TUNNEL_URL"
+              TUNNEL_PROVIDER="Cloudflare Named Tunnel (HTTP/2)"
+            else
+              echo "⚠️ Named Cloudflare Tunnel failed or CLOUDFLARE_TUNNEL_URL secret is unset."
+              cat /tmp/cloudflared.log || true
+              kill "$CF_PID" 2>/dev/null || true
             fi
-            sleep 2
-          done
-          
+          fi
+
+          # Tier 2: Cloudflare Quick Tunnel via TCP/HTTP2 (avoids Azure QUIC UDP stalls)
+          if [ -z "$TUNNEL_URL" ] && [ -x /usr/local/bin/cloudflared ]; then
+            for attempt in 1 2 3; do
+              echo "Attempt ${attempt}/3: Starting Cloudflare Quick Tunnel (http2)..."
+              rm -f /tmp/cloudflared.log
+              setsid /usr/local/bin/cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8080 </dev/null >/tmp/cloudflared.log 2>&1 &
+              CF_PID=$!
+              for _ in {1..8}; do
+                TUNNEL_URL=$(grep -o 'https://[-a-zA-Z0-9]*\.trycloudflare\.com' /tmp/cloudflared.log | head -n 1 || true)
+                if [ -n "$TUNNEL_URL" ]; then
+                  TUNNEL_PROVIDER="Cloudflare Quick Tunnel (HTTP/2)"
+                  break 2
+                fi
+                if ! kill -0 "$CF_PID" 2>/dev/null || grep -qiE 'failed to request quick Tunnel|Too Many Requests|429' /tmp/cloudflared.log 2>/dev/null; then
+                  break
+                fi
+                sleep 2
+              done
+              echo "Cloudflare Quick Tunnel attempt ${attempt} did not return a URL:"
+              cat /tmp/cloudflared.log 2>/dev/null || true
+              kill "$CF_PID" 2>/dev/null || true
+              wait "$CF_PID" 2>/dev/null || true
+              sleep $((attempt * 2))
+            done
+          fi
+
+          # Tier 3: Automatic localhost.run SSH HTTPS fallback if trycloudflare.com is throttled
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "⚠️ Cloudflare Quick Tunnel unavailable; falling back to localhost.run SSH HTTPS tunnel..."
+            rm -f /tmp/lhr.log
+            setsid ssh -T \
+              -o PubkeyAuthentication=no \
+              -o BatchMode=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o ConnectTimeout=10 \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=3 \
+              -o ExitOnForwardFailure=yes \
+              -R 80:127.0.0.1:8080 nokey@localhost.run </dev/null >/tmp/lhr.log 2>&1 &
+            LHR_PID=$!
+            for _ in {1..10}; do
+              TUNNEL_URL=$(grep -oE 'https://[-a-zA-Z0-9.]+\.lhr\.life' /tmp/lhr.log | head -n 1 || true)
+              if [ -n "$TUNNEL_URL" ]; then
+                TUNNEL_PROVIDER="localhost.run SSH Fallback Tunnel"
+                break
+              fi
+              if ! kill -0 "$LHR_PID" 2>/dev/null; then
+                break
+              fi
+              sleep 2
+            done
+            if [ -z "$TUNNEL_URL" ]; then
+              kill "$LHR_PID" 2>/dev/null || true
+            fi
+          fi
+
           if [ -n "$TUNNEL_URL" ]; then
-            echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
-            echo "### 📊 Live Trading Dashboard" >> $GITHUB_STEP_SUMMARY
-            echo "Access your live signals and control workbench anywhere (phone/desktop):" >> $GITHUB_STEP_SUMMARY
-            echo "👉 **[Open Live Dashboard]($TUNNEL_URL)** (\`$TUNNEL_URL\`)" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
+            TUNNEL_HOST=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).hostname or "")' "$TUNNEL_URL")
+            echo "TUNNEL_URL=$TUNNEL_URL" >> "$GITHUB_ENV"
+            if [ -n "$TUNNEL_HOST" ]; then
+              echo "DASHBOARD_ALLOWED_HOSTS=$TUNNEL_HOST" >> "$GITHUB_ENV"
+            fi
+            {
+              echo "### 📊 Live Trading Dashboard"
+              echo "Access your live signals and control workbench anywhere (phone/desktop):"
+              echo "👉 **[Open Live Dashboard]($TUNNEL_URL)** (\`$TUNNEL_URL\`)"
+              echo "- **Tunnel Provider:** ${TUNNEL_PROVIDER}"
+              echo ""
+              echo "### 🔐 Control Plane Access"
+              echo "The dashboard is **Read-Only** by default for public monitoring."
+              if [ "${{ steps.dash_auth.outputs.has_custom_token }}" = "true" ]; then
+                echo "To unlock mutating actions (Panic Flatten, manual exits, parameter staging), paste your configured \`DASHBOARD_AUTH_TOKEN\` secret."
+              elif [ "${IS_PRIVATE_REPO:-false}" = "true" ]; then
+                echo "To unlock mutating actions (Panic Flatten, manual exits, parameter staging), paste this session token into the **Unlock** modal:"
+                echo "🔑 \`${{ steps.dash_auth.outputs.session_token }}\`"
+              else
+                echo "ℹ️ Public repository guard: session unlock token is not printed in public workflow summaries."
+                echo "Check your private Telegram bot alert for this session's unlock token, or configure a \`DASHBOARD_AUTH_TOKEN\` GitHub Secret."
+              fi
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
             echo "=========================================================="
-            echo "🎉 LIVE DASHBOARD ONLINE AT: $TUNNEL_URL"
+            echo "🎉 LIVE DASHBOARD ONLINE ($TUNNEL_PROVIDER): $TUNNEL_URL"
             echo "=========================================================="
           else
-            echo "⚠️ Could not extract Cloudflare tunnel URL; logs:"
-            cat /tmp/cloudflared.log || true
+            {
+              echo "### ⚠️ Live Trading Dashboard Tunnel Unavailable"
+              echo "Cloudflare Tunnel and fallback SSH tunnel both failed to allocate a public URL for this run."
+              echo ""
+              echo "<details><summary>Tunnel Diagnostics Log</summary>"
+              echo ""
+              echo '```text'
+              tail -n 40 /tmp/cloudflared.log /tmp/lhr.log 2>/dev/null || echo "No tunnel logs recorded."
+              echo '```'
+              echo "</details>"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "⚠️ Could not extract any dashboard tunnel URL; logs:"
+            cat /tmp/cloudflared.log /tmp/lhr.log 2>/dev/null || true
           fi
 
       - name: 📈 Execute Quantitative Leveraged Trading Engine
@@ -112,6 +239,9 @@ jobs:
         env:
           TRADING212_API_KEY: ${{ secrets.TRADING212_API_KEY }}
           TRADING212_API_SECRET: ${{ secrets.TRADING212_API_SECRET }}
+          DASHBOARD_AUTH_TOKEN: ${{ secrets.DASHBOARD_AUTH_TOKEN || secrets.PANIC_FLATTEN_TOKEN }}
+          SESSION_UNLOCK_TOKEN: ${{ steps.dash_auth.outputs.session_token }}
+          REPO_IS_PRIVATE: ${{ github.event.repository.private }}
           USE_LIVE: 'false'
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -157,6 +287,7 @@ jobs:
 
           STRATEGY_CHOICE="${{ inputs.strategy || 'vwap' }}"
           USE_LIVE_CHOICE="${{ inputs.use_live || 'false' }}"
+          export STRATEGY_CHOICE
           export USE_LIVE="$USE_LIVE_CHOICE"
           
           echo "=========================================================="
@@ -164,6 +295,11 @@ jobs:
           echo "🎯 Strategy: ${STRATEGY_CHOICE}"
           echo "⏱️ Duration: ${DURATION}m"
           echo "⚙️ Mode: USE_LIVE=${USE_LIVE_CHOICE}"
+          if [ -n "${LIVE_DASHBOARD_PUBLIC_URL:-}" ]; then
+            echo "📊 Live Dashboard: ${LIVE_DASHBOARD_PUBLIC_URL}"
+          else
+            echo "📊 Live Dashboard: Tunnel unavailable (local gateway on 8080 only)"
+          fi
           echo "🌐 Market Data Providers:"
           [ -n "${POLYGON_API_KEY}" ] && echo "  - Polygon.io: CONFIGURED (Key Detected)" || echo "  - Polygon.io: Not configured"
           [ -n "${FMP_API_KEY}" ] && echo "  - Financial Modeling Prep (FMP): CONFIGURED (Key Detected)" || echo "  - FMP: Not configured"
@@ -172,6 +308,57 @@ jobs:
           echo "  - Direct Yahoo Chart API: ACTIVE (Keyless fallback)"
           echo "  - Stooq CSV: ACTIVE (Keyless fallback)"
           echo "=========================================================="
+
+          # Notify Telegram/Discord with the live dashboard link once the HTTP gateway binds :8080
+          NOTIFY_PID=""
+          cleanup_notify() {
+            [ -n "${NOTIFY_PID:-}" ] && kill "$NOTIFY_PID" 2>/dev/null || true
+          }
+          trap cleanup_notify EXIT
+          if [ -n "${LIVE_DASHBOARD_PUBLIC_URL:-}" ]; then
+            python3 -c '
+          import json, os, time, urllib.request
+          url = os.environ.get("LIVE_DASHBOARD_PUBLIC_URL", "").strip()
+          tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+          tg_chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+          dc_hook = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+          strat = os.environ.get("STRATEGY_CHOICE", "vwap")
+          mode = "LIVE" if os.environ.get("USE_LIVE", "false").lower() == "true" else "DEMO"
+          for _ in range(90):
+              try:
+                  with urllib.request.urlopen("http://127.0.0.1:8080/api/data", timeout=2) as r:
+                      if r.status == 200:
+                          break
+              except Exception:
+                  time.sleep(2)
+          else:
+              raise SystemExit(0)
+          msg = f"📊 Live Dashboard Online ({strat} | {mode})\n👉 {url}"
+          tok = os.environ.get("SESSION_UNLOCK_TOKEN", "").strip()
+          if tg_token and tg_chat:
+              tg_msg = msg + (f"\n🔑 Session Unlock Token: {tok}" if tok else "")
+              try:
+                  req = urllib.request.Request(
+                      f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                      data=json.dumps({"chat_id": tg_chat, "text": tg_msg}).encode(),
+                      headers={"Content-Type": "application/json"},
+                  )
+                  urllib.request.urlopen(req, timeout=5).read()
+              except Exception:
+                  pass
+          if dc_hook:
+              try:
+                  req = urllib.request.Request(
+                      dc_hook,
+                      data=json.dumps({"content": msg}).encode(),
+                      headers={"Content-Type": "application/json"},
+                  )
+                  urllib.request.urlopen(req, timeout=5).read()
+              except Exception:
+                  pass
+          ' &
+            NOTIFY_PID=$!
+          fi
           
           python3 -m trading_system.orchestrator \
             --strategy "$STRATEGY_CHOICE" \
@@ -184,6 +371,7 @@ jobs:
       - name: 💾 Synchronize Active Trades State to Repository
         if: always() && steps.market_check.outputs.should_run != 'false'
         run: |
+          rm -f data/.dashboard_token
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Market Runner"
           CURRENT_BRANCH="${{ github.ref_name }}"
