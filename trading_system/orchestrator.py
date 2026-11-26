@@ -2,7 +2,7 @@
 
 Deterministic 5-Step Execution Pipeline:
 1. Market Check: Validates Trading 212 broker connectivity, account cash, and circuit breakers.
-2. Ingest Candles: Ingests live 15m/1d OHLCV bars, computing VWAP, ATR, and momentum indicators.
+2. Ingest Candles: Ingests live 5m/1d OHLCV bars, computing VWAP, ATR, and momentum indicators.
 3. Strategy Screen: Evaluates universe candidates against active quantitative strategy rules.
 4. Risk Sizing & Protection: Direct quantitative risk sizing, ATR stops, and leverage configuration.
 5. Order Route / Standby: Dispatches market entry orders to Trading 212 or enters standby mode.
@@ -1690,8 +1690,8 @@ class Orchestrator:
         def _fetch_one(symbol: str) -> tuple[str, Optional[Dict[str, Any]]]:
             try:
                 daily = MarketDataProvider.get_daily_candles(symbol, period="1y")
-                hourly = MarketDataProvider.get_hourly_candles(symbol, period="1mo")
-                metrics = MarketDataProvider.compute_indicators(daily, hourly, symbol=symbol)
+                intraday_5m = MarketDataProvider.get_5m_candles(symbol, period="5d")
+                metrics = MarketDataProvider.compute_indicators(daily, intraday_data=intraday_5m, symbol=symbol)
                 # Ingest Nixtla 5-day forecast for active underlying if available
                 try:
                     forecast = MarketDataProvider.get_5day_forecast(symbol)
@@ -1756,8 +1756,8 @@ class Orchestrator:
         def _fetch_asset(symbol: str) -> tuple[str, Optional[Dict[str, Any]]]:
             try:
                 daily = MarketDataProvider.get_daily_candles(symbol, period="1y")
-                hourly = MarketDataProvider.get_hourly_candles(symbol, period="1mo")
-                metrics = MarketDataProvider.compute_indicators(daily, hourly, symbol=symbol)
+                intraday_5m = MarketDataProvider.get_5m_candles(symbol, period="5d")
+                metrics = MarketDataProvider.compute_indicators(daily, intraday_data=intraday_5m, symbol=symbol)
                 if metrics:
                     metrics["is_synthetic"] = MarketDataProvider.is_ticker_synthetic(symbol)
                     if metrics.get("earnings_in_days") is None:
@@ -2759,7 +2759,7 @@ class Orchestrator:
 
         # Step 2: Ingest Candles (Data Ingestion under cycle_snapshot)
         self._broadcast_pipeline_progress(
-            2, "Ingest Candles", f"Ingesting 15m candle bars & metrics for {len(self.universe)} universe assets.",
+            2, "Ingest Candles", f"Ingesting 5m candle bars & metrics for {len(self.universe)} universe assets.",
             cycle_id=self._current_cycle_id
         )
         ingest_fn = self.ingest_universe_data

@@ -2205,17 +2205,54 @@ class MarketDataProvider:
         return final_output
 
     @staticmethod
-    def get_hourly_candles(symbol: str, period: str = "1mo", force_refresh: bool = False) -> Any:
-        """Get 1H OHLCV candles with persistent CandleDatabase caching and delta fetching."""
+    def _normalize_intraday_timestamp(raw_val: Any) -> str:
+        """Normalize a timestamp value to UTC 'YYYY-MM-DD HH:MM:SS'."""
+        if raw_val is None:
+            return ""
+        if isinstance(raw_val, datetime):
+            dt = raw_val.replace(tzinfo=timezone.utc) if raw_val.tzinfo is None else raw_val.astimezone(timezone.utc)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        if hasattr(raw_val, "to_pydatetime"):
+            try:
+                py_dt = raw_val.to_pydatetime()
+                dt = py_dt.replace(tzinfo=timezone.utc) if py_dt.tzinfo is None else py_dt.astimezone(timezone.utc)
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
+        raw_str = str(raw_val).strip()
+        if not raw_str:
+            return ""
+        try:
+            dt = datetime.fromisoformat(raw_str.replace("Z", "+00:00"))
+            dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return raw_str[:19]
+
+    @staticmethod
+    def _get_intraday_candles(
+        symbol: str,
+        *,
+        period: str,
+        interval: str,
+        cache_prefix: str,
+        cache_ttl_cap: Optional[int],
+        db_limit: int,
+        force_refresh: bool = False,
+    ) -> Any:
+        """Get intraday OHLCV candles ('5m' or '1h') with cache, SQLite delta sync, and waterfall."""
         try:
             from trading_system.config import settings
             use_cache = getattr(settings, "ENABLE_CANDLE_CACHE", True)
-            ttl = getattr(settings, "CANDLE_CACHE_TTL_SECONDS", 300)
+            ttl = int(getattr(settings, "CANDLE_CACHE_TTL_SECONDS", 300))
         except Exception:
             use_cache = True
             ttl = 300
 
-        cache_key = f"hourly_{symbol.upper()}_{period}"
+        if cache_ttl_cap is not None:
+            ttl = min(ttl, cache_ttl_cap)
+
+        cache_key = f"{cache_prefix}_{symbol.upper()}_{period}"
         if use_cache and not force_refresh and cache_key in MarketDataProvider._CANDLE_CACHE:
             ts, val = MarketDataProvider._CANDLE_CACHE[cache_key]
             if time.time() - ts < ttl:
@@ -2223,16 +2260,39 @@ class MarketDataProvider:
 
         clean_upper = symbol.upper().strip()
         query_sym = MarketDataProvider.YAHOO_TRANSLATIONS.get(clean_upper, symbol)
+        now_utc = datetime.now(timezone.utc)
+        today_utc = now_utc.strftime("%Y-%m-%d")
 
         # ── Fast-path: Check persistent CandleDatabase ──
         fetch_period = period
         try:
             from trading_system.data.candle_db import CandleDatabase
             cdb = CandleDatabase.get_instance()
-            stored_count = cdb.get_candle_count(clean_upper, "1h")
-            latest_date = cdb.get_latest_date(clean_upper, "1h")
-            # If we have substantial history (>= 40 hourly candles), fetch only 5d delta
-            if stored_count >= 40 and not force_refresh and latest_date:
+            stored_count = cdb.get_candle_count(clean_upper, interval)
+            latest_date = cdb.get_latest_date(clean_upper, interval)
+
+            if interval == "5m" and stored_count >= 30 and not force_refresh and latest_date:
+                try:
+                    latest_dt = datetime.strptime(latest_date[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                    age_sec = (now_utc - latest_dt).total_seconds()
+                    if 0 <= age_sec < 240:
+                        cached_bars = cdb.get_candles(clean_upper, "5m", limit=db_limit)
+                        if cached_bars:
+                            if HAS_DATA_LIBS and pd is not None:
+                                res_df = pd.DataFrame(cached_bars)[["date", "open", "high", "low", "close", "volume"]]
+                            else:
+                                res_df = cached_bars
+                            if use_cache:
+                                MarketDataProvider._CANDLE_CACHE[cache_key] = (
+                                    time.time(),
+                                    res_df.copy() if hasattr(res_df, "copy") else [dict(x) for x in res_df],
+                                )
+                            return res_df
+                except ValueError:
+                    pass
+                if latest_date.startswith(today_utc):
+                    fetch_period = "1d"
+            elif interval == "1h" and stored_count >= 40 and not force_refresh and latest_date:
                 fetch_period = "5d"
         except Exception:
             fetch_period = period
@@ -2244,15 +2304,20 @@ class MarketDataProvider:
             from trading_system.config import settings
             from trading_system.data.multi_provider import MultiProviderRouter
             router = MultiProviderRouter.get_instance()
-            managed_candles = router.get_hourly_candles_cascade(query_sym, settings, period=fetch_period)
+            if interval == "5m":
+                managed_candles = router.get_5m_candles_cascade(query_sym, settings, period=fetch_period)
+            else:
+                managed_candles = router.get_hourly_candles_cascade(query_sym, settings, period=fetch_period)
             if managed_candles:
                 result = managed_candles
         except Exception as mp_err:
-            logger.debug("MultiProviderRouter hourly fetch error for %s: %s", query_sym, mp_err)
+            logger.debug("MultiProviderRouter %s fetch error for %s: %s", interval, query_sym, mp_err)
 
         # 2. Try raw Yahoo Finance Chart API (keyless)
         if result is None:
-            candles = MarketDataProvider._fetch_yahoo_chart_data(query_sym, range_str=fetch_period, interval="1h")
+            candles = MarketDataProvider._fetch_yahoo_chart_data(query_sym, range_str=fetch_period, interval=interval)
+            if not candles and fetch_period != period:
+                candles = MarketDataProvider._fetch_yahoo_chart_data(query_sym, range_str=period, interval=interval)
             if candles:
                 result = candles
 
@@ -2260,18 +2325,22 @@ class MarketDataProvider:
         if result is None and HAS_DATA_LIBS and yf is not None:
             try:
                 ticker = yf.Ticker(query_sym)
-                df = ticker.history(period=fetch_period, interval="1h")
+                df = ticker.history(period=fetch_period, interval=interval)
+                if df.empty and fetch_period != period:
+                    df = ticker.history(period=period, interval=interval)
                 if not df.empty:
                     df.reset_index(inplace=True)
                     df.rename(
                         columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume", "Datetime": "date", "Date": "date"},
                         inplace=True,
                     )
+                    if "date" in df.columns:
+                        df["date"] = df["date"].apply(MarketDataProvider._normalize_intraday_timestamp)
                     result = df
             except Exception:
                 pass
 
-        # Merge newly fetched hourly candles into CandleDatabase
+        # Merge newly fetched intraday candles into CandleDatabase
         if result is not None:
             try:
                 from trading_system.data.candle_db import CandleDatabase
@@ -2280,26 +2349,36 @@ class MarketDataProvider:
                     records = result.to_dict(orient="records")
                     if "date" not in result.columns and hasattr(result, "index"):
                         for idx, rec in enumerate(records):
-                            rec["date"] = str(result.index[idx])
+                            rec["date"] = MarketDataProvider._normalize_intraday_timestamp(result.index[idx])
+                    else:
+                        for rec in records:
+                            rec["date"] = MarketDataProvider._normalize_intraday_timestamp(rec.get("date"))
                 else:
                     records = result if isinstance(result, list) else []
+                    for rec in records:
+                        if isinstance(rec, dict) and rec.get("date") is not None:
+                            rec["date"] = MarketDataProvider._normalize_intraday_timestamp(rec.get("date"))
 
                 if records:
-                    cdb.upsert_candles(clean_upper, "1h", records)
-                    merged = cdb.get_candles(clean_upper, "1h", limit=120)
+                    cdb.upsert_candles(clean_upper, interval, records)
+                    merged = cdb.get_candles(clean_upper, interval, limit=db_limit)
                     if merged and len(merged) >= len(records):
                         if HAS_DATA_LIBS and pd is not None:
-                            result = pd.DataFrame(merged)[["open", "high", "low", "close", "volume"]]
+                            result = pd.DataFrame(merged)[["date", "open", "high", "low", "close", "volume"]]
                         else:
                             result = merged
             except Exception as upsert_exc:
-                logger.debug("Hourly Candle DB upsert failed for %s: %s", clean_upper, upsert_exc)
+                logger.debug("%s Candle DB upsert failed for %s: %s", interval, clean_upper, upsert_exc)
 
         if result is None:
-            result = MarketDataProvider._generate_synthetic_candles(symbol, range_str="1mo", interval="1h")
+            if interval == "5m":
+                MarketDataProvider.SYNTHETIC_TICKERS.add(symbol.upper())
+                MarketDataProvider.LAST_FETCH_WAS_SYNTHETIC = True
+            result = MarketDataProvider._generate_synthetic_candles(symbol, range_str=period, interval=interval)
 
         if HAS_DATA_LIBS and pd is not None and isinstance(result, pd.DataFrame):
-            final_output = result[["open", "high", "low", "close", "volume"]] if all(c in result.columns for c in ["open", "high", "low", "close", "volume"]) else result
+            keep_cols = [c for c in ["date", "open", "high", "low", "close", "volume"] if c in result.columns]
+            final_output = result[keep_cols] if all(c in result.columns for c in ["open", "high", "low", "close", "volume"]) else result
         else:
             final_output = result
 
@@ -2311,7 +2390,33 @@ class MarketDataProvider:
         return final_output
 
     @staticmethod
-    def _generate_synthetic_candles(symbol: str, range_str: str = "1y", interval: str = "1d") -> List[Dict[str, float]]:
+    def get_hourly_candles(symbol: str, period: str = "1mo", force_refresh: bool = False) -> Any:
+        """Get 1H OHLCV candles with persistent CandleDatabase caching and delta fetching."""
+        return MarketDataProvider._get_intraday_candles(
+            symbol=symbol,
+            period=period,
+            interval="1h",
+            cache_prefix="hourly",
+            cache_ttl_cap=None,
+            db_limit=120,
+            force_refresh=force_refresh,
+        )
+
+    @staticmethod
+    def get_5m_candles(symbol: str, period: str = "5d", force_refresh: bool = False) -> Any:
+        """Get 5m intraday OHLCV candles with persistent CandleDatabase caching and delta fetching."""
+        return MarketDataProvider._get_intraday_candles(
+            symbol=symbol,
+            period=period,
+            interval="5m",
+            cache_prefix="5m",
+            cache_ttl_cap=60,
+            db_limit=300,
+            force_refresh=force_refresh,
+        )
+
+    @staticmethod
+    def _generate_synthetic_candles(symbol: str, range_str: str = "1y", interval: str = "1d") -> List[Dict[str, Any]]:
         """Generate deterministic, high-fidelity realistic candle sequence for offline/sandboxed execution."""
         base_prices = {
             "QQQ": 505.0, "SPY": 585.0, "NVDA": 138.0, "TSLA": 222.0, "AAPL": 232.0,
@@ -2332,366 +2437,465 @@ class MarketDataProvider:
         }
         clean_sym = symbol.upper().replace("^", "")
         base = base_prices.get(symbol, base_prices.get(clean_sym, 150.0))
-        n_candles = 250 if interval == "1d" else 60
+        is_5m = interval == "5m"
+        n_candles = 250 if interval == "1d" else (120 if is_5m else 60)
 
         import random
         # Deterministic seed per symbol ensures exact reproducibility
         seed = sum(ord(c) for c in symbol) * 1000 + 42
         rng = random.Random(seed)
 
-        candles = []
-        p = base * 0.85  # Start lower to establish long-term uptrend above 200 SMA
+        candles: List[Dict[str, Any]] = []
+        p = base * (0.985 if is_5m else 0.85)  # Start lower to establish uptrend above baseline
         trend = p
 
         is_3rsi_target = symbol in ("QQQ", "TSM")
         is_breakout_target = symbol in ("NVDA", "SOXX", "SPY")
 
+        end_dt_5m = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        end_dt_5m = end_dt_5m.replace(minute=(end_dt_5m.minute // 5) * 5)
+
         for i in range(n_candles):
-            # Macro drift
-            trend *= (1.0 + 0.0006)
-            reversion_speed = 0.08
-            diff_from_trend = (trend - p) / trend
-            drift = reversion_speed * diff_from_trend + 0.0004
-            daily_vol = rng.gauss(0.0, 0.012)
-
-            # Realistic cyclical mean-reversion pullbacks & relief bounces
-            if i % 30 in (12, 13):
-                daily_vol -= 0.024  # sharp dip driving short-term RSI oversold
-            elif i % 30 in (14, 15):
-                daily_vol += 0.020  # mean-reversion relief snapback
-
-            # Target 3-RSI setup: simulate a sharp 3-day oversold liquidation dip at the end
-            if is_3rsi_target and i >= n_candles - 3:
-                pct_change = -0.024
-            # Target Breakout setup: strong expansion into 20-day high at the end
-            elif is_breakout_target and i >= n_candles - 5:
-                pct_change = +0.016
+            if is_5m:
+                trend *= (1.0 + 0.00012)
+                reversion_speed = 0.08
+                diff_from_trend = (trend - p) / trend
+                drift = reversion_speed * diff_from_trend + 0.00008
+                bar_vol = rng.gauss(0.0, 0.0022)
+                if i % 30 in (12, 13):
+                    bar_vol -= 0.0035
+                elif i % 30 in (14, 15):
+                    bar_vol += 0.0030
+                if is_3rsi_target and i >= n_candles - 3:
+                    pct_change = -0.004
+                elif is_breakout_target and i >= n_candles - 5:
+                    pct_change = +0.003
+                else:
+                    pct_change = drift + bar_vol
+                wick_scale = 0.0012
             else:
-                pct_change = drift + daily_vol
+                trend *= (1.0 + 0.0006)
+                reversion_speed = 0.08
+                diff_from_trend = (trend - p) / trend
+                drift = reversion_speed * diff_from_trend + 0.0004
+                daily_vol = rng.gauss(0.0, 0.012)
+
+                # Realistic cyclical mean-reversion pullbacks & relief bounces
+                if i % 30 in (12, 13):
+                    daily_vol -= 0.024  # sharp dip driving short-term RSI oversold
+                elif i % 30 in (14, 15):
+                    daily_vol += 0.020  # mean-reversion relief snapback
+
+                # Target 3-RSI setup: simulate a sharp 3-day oversold liquidation dip at the end
+                if is_3rsi_target and i >= n_candles - 3:
+                    pct_change = -0.024
+                # Target Breakout setup: strong expansion into 20-day high at the end
+                elif is_breakout_target and i >= n_candles - 5:
+                    pct_change = +0.016
+                else:
+                    pct_change = drift + daily_vol
+                wick_scale = 0.006
 
             if clean_sym in ("3GISL_EQ", "3GIS.L", "3GIS") and i == n_candles - 1:
                 p = 7805.0
             else:
                 p = max(1.0, p * (1.0 + pct_change))
-            wick_up = abs(rng.gauss(0.006, 0.003)) * p
-            wick_down = abs(rng.gauss(0.006, 0.003)) * p
+            wick_up = abs(rng.gauss(wick_scale, wick_scale * 0.5)) * p
+            wick_down = abs(rng.gauss(wick_scale, wick_scale * 0.5)) * p
             high = p + wick_up
             low = max(0.01, p - wick_down)
             open_p = p - rng.uniform(-0.35, 0.35) * (high - low)
             open_p = max(low, min(high, open_p))
-            vol = 2000000.0 + (rng.uniform(-0.3, 0.5) * 1000000.0)
+            vol = (150000.0 if is_5m else 2000000.0) + (rng.uniform(-0.3, 0.5) * (75000.0 if is_5m else 1000000.0))
 
-            candles.append({
+            bar: Dict[str, Any] = {
                 "open": round(open_p, 2),
                 "high": round(high, 2),
                 "low": round(low, 2),
                 "close": round(p, 2),
                 "volume": round(vol, 0),
-            })
+            }
+            if is_5m:
+                bar_dt = end_dt_5m - timedelta(minutes=5 * (n_candles - 1 - i))
+                bar["date"] = bar_dt.strftime("%Y-%m-%d %H:%M:%S")
+            candles.append(bar)
         return candles
 
     @staticmethod
-    def compute_indicators(daily_data: Any, hourly_data: Any, symbol: Optional[str] = None) -> Dict[str, Any]:
-        """Compute all required indicators: SMA200, EMA20/50, RSI, ATR, ADX, High20d, and days to earnings."""
+    def _is_nonempty_bars(data: Any) -> bool:
+        """Return True if *data* is a non-empty DataFrame or list of OHLCV dicts."""
+        if data is None:
+            return False
+        if isinstance(data, list):
+            return len(data) > 0
+        if HAS_DATA_LIBS and pd is not None and isinstance(data, pd.DataFrame):
+            return not data.empty
+        empty_attr = getattr(data, "empty", None)
+        if isinstance(empty_attr, bool):
+            return not empty_attr
+        return False
+
+    @staticmethod
+    def _extract_ohlcv_arrays(
+        data: Any,
+    ) -> Tuple[List[str], List[float], List[float], List[float], List[float], List[float]]:
+        """Extract chronological OHLCV arrays and optional dates from a DataFrame or bar list."""
+        dates: List[str] = []
+        opens: List[float] = []
+        highs: List[float] = []
+        lows: List[float] = []
+        closes: List[float] = []
+        volumes: List[float] = []
+
+        if HAS_DATA_LIBS and pd is not None and isinstance(data, pd.DataFrame):
+            if data.empty:
+                return dates, opens, highs, lows, closes, volumes
+            if "date" in data.columns:
+                dates = [str(v) if v is not None else "" for v in data["date"].tolist()]
+            elif hasattr(data, "index"):
+                dates = [
+                    str(v) if isinstance(v, (datetime, pd.Timestamp)) or ("-" in str(v)) else ""
+                    for v in data.index.tolist()
+                ]
+            else:
+                dates = [""] * len(data)
+            closes = [float(x) for x in data["close"].tolist()]
+            highs = [float(x) for x in data["high"].tolist()]
+            lows = [float(x) for x in data["low"].tolist()]
+            opens = [float(x) for x in data["open"].tolist()] if "open" in data.columns else list(closes)
+            volumes = [float(x or 0.0) for x in data["volume"].tolist()] if "volume" in data.columns else [0.0] * len(closes)
+            return dates, opens, highs, lows, closes, volumes
+
+        if isinstance(data, list):
+            for c in data:
+                if not isinstance(c, dict) or c.get("close") is None:
+                    continue
+                cl = float(c["close"])
+                dates.append(str(c.get("date") or ""))
+                opens.append(float(c.get("open", cl) if c.get("open") is not None else cl))
+                highs.append(float(c.get("high", cl) if c.get("high") is not None else cl))
+                lows.append(float(c.get("low", cl) if c.get("low") is not None else cl))
+                closes.append(cl)
+                volumes.append(float(c.get("volume", 0.0) or 0.0))
+
+        return dates, opens, highs, lows, closes, volumes
+
+    @staticmethod
+    def _calc_ema(vals: List[float], span: int) -> List[float]:
+        """Compute exponential moving average series with alpha = 2 / (span + 1)."""
+        if not vals:
+            return []
+        alpha = 2.0 / (span + 1.0)
+        out = [float(vals[0])]
+        ema = out[0]
+        for v in vals[1:]:
+            ema = alpha * float(v) + (1.0 - alpha) * ema
+            out.append(ema)
+        return out
+
+    @staticmethod
+    def _calc_wilder_dmi(
+        highs: List[float],
+        lows: List[float],
+        closes: List[float],
+        period: int = 14,
+    ) -> Tuple[float, float, float]:
+        """Compute Wilder ADX(period), +DI, and -DI matching pandas EWM (adjust=False)."""
+        n = len(closes)
+        if n < 2:
+            return 0.0, 0.0, 0.0
+
+        alpha = 1.0 / float(period)
+        tr_ema = max(0.0, highs[0] - lows[0])
+        pdm_ema = 0.0
+        mdm_ema = 0.0
+        dx_ema = 0.0
+
+        for i in range(1, n):
+            tr = max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i - 1]),
+                abs(lows[i] - closes[i - 1]),
+            )
+            up = highs[i] - highs[i - 1]
+            down = lows[i - 1] - lows[i]
+            pdm = up if (up > down and up > 0.0) else 0.0
+            mdm = down if (down > up and down > 0.0) else 0.0
+
+            tr_ema = alpha * tr + (1.0 - alpha) * tr_ema
+            pdm_ema = alpha * pdm + (1.0 - alpha) * pdm_ema
+            mdm_ema = alpha * mdm + (1.0 - alpha) * mdm_ema
+
+            pdi = 100.0 * (pdm_ema / (tr_ema + 1e-9))
+            mdi = 100.0 * (mdm_ema / (tr_ema + 1e-9))
+            dx = 100.0 * abs(pdi - mdi) / (pdi + mdi + 1e-9)
+            dx_ema = dx if i == 1 else (alpha * dx + (1.0 - alpha) * dx_ema)
+
+        pdi_final = 100.0 * (pdm_ema / (tr_ema + 1e-9))
+        mdi_final = 100.0 * (mdm_ema / (tr_ema + 1e-9))
+        return float(dx_ema), float(pdi_final), float(mdi_final)
+
+    @staticmethod
+    def _compute_session_vwap(
+        dates: List[str],
+        highs: List[float],
+        lows: List[float],
+        closes: List[float],
+        volumes: List[float],
+        current_close: float,
+        default_window: int = 78,
+    ) -> Tuple[float, float, float, float]:
+        """Compute session-anchored VWAP, distance %, and +/- 1-sigma bands."""
+        import math
+
+        n = len(closes)
+        if n == 0:
+            return current_close, 0.0, current_close, max(0.01, current_close)
+
+        start_idx = max(0, n - default_window)
+        last_dt = dates[-1] if dates else ""
+        if last_dt and (" " in last_dt or "T" in last_dt):
+            latest_day = last_dt.split(" ")[0].split("T")[0]
+            day_start = n
+            for idx in range(n - 1, -1, -1):
+                d_str = dates[idx]
+                if d_str and d_str.split(" ")[0].split("T")[0] == latest_day:
+                    day_start = idx
+                else:
+                    break
+            if (n - day_start) >= 6:
+                start_idx = day_start
+
+        h_win = highs[start_idx:]
+        l_win = lows[start_idx:]
+        c_win = closes[start_idx:]
+        v_win = volumes[start_idx:]
+
+        typ_px = [(h_win[i] + l_win[i] + c_win[i]) / 3.0 for i in range(len(c_win))]
+        sum_v = sum(v_win)
+        if sum_v > 0:
+            vwap_val = sum(typ_px[i] * v_win[i] for i in range(len(c_win))) / sum_v
+            variance_vwap = sum(((typ_px[i] - vwap_val) ** 2) * v_win[i] for i in range(len(c_win))) / sum_v
+        else:
+            vwap_val = sum(typ_px) / len(typ_px)
+            variance_vwap = sum((p - vwap_val) ** 2 for p in typ_px) / max(1, len(typ_px))
+
+        vwap_std = math.sqrt(max(0.0, variance_vwap))
+        vwap_dist_pct = ((current_close - vwap_val) / vwap_val) * 100.0 if vwap_val > 0 else 0.0
+        vwap_upper_1std = vwap_val + vwap_std
+        vwap_lower_1std = max(0.01, vwap_val - vwap_std)
+        return vwap_val, vwap_dist_pct, vwap_upper_1std, vwap_lower_1std
+
+    @staticmethod
+    def _serialize_bars(
+        dates: List[str],
+        opens: List[float],
+        highs: List[float],
+        lows: List[float],
+        closes: List[float],
+        volumes: List[float],
+        max_bars: int = 120,
+    ) -> List[Dict[str, Any]]:
+        """Serialize trailing chronological OHLCV bars for downstream strategy evaluation."""
+        start_idx = max(0, len(closes) - max_bars)
+        bars: List[Dict[str, Any]] = []
+        for i in range(start_idx, len(closes)):
+            if closes[i] <= 0:
+                continue
+            item: Dict[str, Any] = {
+                "open": float(opens[i]),
+                "high": float(highs[i]),
+                "low": float(lows[i]),
+                "close": float(closes[i]),
+                "volume": float(volumes[i]),
+            }
+            if i < len(dates) and dates[i]:
+                item["date"] = dates[i]
+            bars.append(item)
+        return bars
+
+    @staticmethod
+    def compute_indicators(
+        daily_data: Any,
+        hourly_data: Any = None,
+        symbol: Optional[str] = None,
+        intraday_data: Any = None,
+    ) -> Dict[str, Any]:
+        """Compute quantitative indicators from daily and intraday (5m / 1h) OHLCV bars."""
+        import math
+
         earnings_days = MarketDataProvider.get_days_to_earnings(symbol) if symbol else None
 
-        # 1. Pandas path if available
-        if HAS_DATA_LIBS and hasattr(daily_data, "empty") and not daily_data.empty:
-            if len(daily_data) < 50:
+        is_df = HAS_DATA_LIBS and pd is not None and isinstance(daily_data, pd.DataFrame)
+        if is_df:
+            if daily_data.empty or len(daily_data) < 50:
                 return {}
-            daily_close = daily_data["close"].values
-            daily_high = daily_data["high"].values
-            daily_low = daily_data["low"].values
-
-            window_sma = min(200, len(daily_close))
-            sma200 = float(pd.Series(daily_close).rolling(window=window_sma).mean().iloc[-1])
-            current_close = float(daily_close[-1])
-            sma200_dist = ((current_close - sma200) / sma200) * 100
-
-            hourly_close = hourly_data["close"] if (hasattr(hourly_data, "empty") and not hourly_data.empty) else pd.Series(daily_close)
-            ema20 = float(hourly_close.ewm(span=20, adjust=False).mean().iloc[-1])
-            ema50 = float(hourly_close.ewm(span=50, adjust=False).mean().iloc[-1])
-            trend = "up" if ema20 > ema50 else "down"
-
-            # Multi-Period RSI: 3 (Ultra-Fast Connors), 7 (Medium), 14 (Standard Macro)
-            delta = pd.Series(daily_close).diff()
-
-            def _calc_pd_rsi(period: int) -> float:
-                g = (delta.where(delta > 0, 0)).ewm(alpha=1.0 / period, adjust=False).mean()
-                l = (-delta.where(delta < 0, 0)).ewm(alpha=1.0 / period, adjust=False).mean()
-                rs = g / (l + 1e-9)
-                return float((100.0 - (100.0 / (1.0 + rs))).iloc[-1])
-
-            rsi3 = _calc_pd_rsi(3)
-            rsi7 = _calc_pd_rsi(7)
-            rsi14 = _calc_pd_rsi(14)
-            sma5 = float(pd.Series(daily_close).rolling(window=min(5, len(daily_close))).mean().iloc[-1])
-
-            # ATR(14)
-            prev_close = pd.Series(daily_close).shift(1)
-            tr1 = pd.Series(daily_high) - pd.Series(daily_low)
-            tr2 = (pd.Series(daily_high) - prev_close).abs()
-            tr3 = (pd.Series(daily_low) - prev_close).abs()
-            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-            atr = float(tr.ewm(alpha=1/14, adjust=False).mean().iloc[-1])
-
-            # ADX(14) & DMI (+DI, -DI)
-            plus_dm = pd.Series(daily_high).diff()
-            minus_dm = -pd.Series(daily_low).diff()
-            plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-            minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-            smooth_tr = tr.ewm(alpha=1/14, adjust=False).mean()
-            plus_di_series = 100 * (plus_dm.ewm(alpha=1/14, adjust=False).mean() / (smooth_tr + 1e-9))
-            minus_di_series = 100 * (minus_dm.ewm(alpha=1/14, adjust=False).mean() / (smooth_tr + 1e-9))
-            dx = (100 * (plus_di_series - minus_di_series).abs() / (plus_di_series + minus_di_series + 1e-9))
-            adx = float(dx.ewm(alpha=1/14, adjust=False).mean().iloc[-1])
-            plus_di = float(plus_di_series.iloc[-1])
-            minus_di = float(minus_di_series.iloc[-1])
-
-            # Donchian 20d Channels
-            donchian_high_20 = float(daily_data["high"].tail(20).max())
-            donchian_low_20 = float(daily_data["low"].tail(20).min())
-            donchian_mid_20 = (donchian_high_20 + donchian_low_20) / 2.0
-            high_20d = donchian_high_20
-
-            # Bollinger Bands (20, 2)
-            bb_series = pd.Series(daily_close).tail(20)
-            bb_mid = float(bb_series.mean())
-            bb_std = float(bb_series.std()) if len(bb_series) > 1 else 0.0
-            bb_upper = bb_mid + 2.0 * bb_std
-            bb_lower = bb_mid - 2.0 * bb_std
-            bb_bandwidth = ((bb_upper - bb_lower) / bb_mid) if bb_mid > 0 else 0.0
-            bb_pct_b = ((current_close - bb_lower) / (bb_upper - bb_lower)) if (bb_upper - bb_lower) > 0 else 0.5
-
-            # Keltner Channels (EMA20 +/- 2 * ATR)
-            kc_mid = ema20
-            kc_upper = kc_mid + 2.0 * atr
-            kc_lower = kc_mid - 2.0 * atr
-
-            # ATR 20d SMA & Spike Ratio
-            atr_rolling = tr.rolling(window=min(20, len(tr))).mean()
-            atr_20d_sma = float(atr_rolling.iloc[-1]) if not atr_rolling.empty else atr
-            atr_spike_ratio = round(atr / (atr_20d_sma + 1e-9), 4) if atr_20d_sma > 0 else 1.0
-
-            # MACD (12, 26, 9) & Daily Trend Hierarchy
-            daily_series = pd.Series(daily_close)
-            daily_ema20_series = daily_series.ewm(span=20, adjust=False).mean()
-            daily_ema50_series = daily_series.ewm(span=50, adjust=False).mean()
-            daily_ema20 = float(daily_ema20_series.iloc[-1])
-            daily_ema50 = float(daily_ema50_series.iloc[-1])
-            ema20_slope_5d = float((daily_ema20_series.iloc[-1] - daily_ema20_series.iloc[-min(5, len(daily_ema20_series))]) / (daily_ema20_series.iloc[-min(5, len(daily_ema20_series))] + 1e-9) * 100.0) if len(daily_ema20_series) >= 5 else 0.0
-
-            ema12 = daily_series.ewm(span=12, adjust=False).mean()
-            ema26 = daily_series.ewm(span=26, adjust=False).mean()
-            macd_series = ema12 - ema26
-            macd_sig_series = macd_series.ewm(span=9, adjust=False).mean()
-            macd = float(macd_series.iloc[-1])
-            macd_signal = float(macd_sig_series.iloc[-1])
-            macd_hist = float((macd_series - macd_sig_series).iloc[-1])
-
-            # 20-day annualized realized volatility for volatility-targeted sizing
-            pct_chg = pd.Series(daily_close).pct_change().tail(20)
-            realized_vol = float(pct_chg.std() * (252 ** 0.5)) if len(pct_chg.dropna()) > 5 else 0.25
-            if not (realized_vol > 0):
-                realized_vol = 0.25
-
-            # Session VWAP & Standard Deviation Bands
-            src_data = hourly_data if (hasattr(hourly_data, "empty") and not hourly_data.empty) else daily_data
-            h_vals = src_data["high"].values
-            l_vals = src_data["low"].values
-            c_vals = src_data["close"].values
-            v_vals = src_data["volume"].values if "volume" in src_data else np.ones_like(c_vals)
-
-            window_vwap = min(24, len(c_vals))
-            h_win = h_vals[-window_vwap:]
-            l_win = l_vals[-window_vwap:]
-            c_win = c_vals[-window_vwap:]
-            v_win = v_vals[-window_vwap:]
-
-            sum_v = float(np.sum(v_win))
-            typ_px = (h_win + l_win + c_win) / 3.0
-            if sum_v > 0:
-                vwap_val = float(np.sum(typ_px * v_win) / sum_v)
-                vwap_std = float(np.sqrt(np.sum(((typ_px - vwap_val) ** 2) * v_win) / sum_v))
-            else:
-                vwap_val = float(np.mean(typ_px))
-                vwap_std = float(np.std(typ_px))
-
-            vwap_dist_pct = float(((current_close - vwap_val) / vwap_val) * 100.0) if vwap_val > 0 else 0.0
-            vwap_upper_1std = vwap_val + vwap_std
-            vwap_lower_1std = max(0.01, vwap_val - vwap_std)
-
-            return {
-                "close": current_close,
-                "sma200": round(sma200, 2),
-                "sma200_dist": round(sma200_dist, 2),
-                "sma5": round(sma5, 2),
-                "ema20": round(ema20, 2),
-                "ema50": round(ema50, 2),
-                "trend": trend,
-                "rsi": round(rsi14, 2),
-                "rsi3": round(rsi3, 2),
-                "rsi7": round(rsi7, 2),
-                "rsi14": round(rsi14, 2),
-                "adx": round(adx, 2),
-                "plus_di": round(plus_di, 2),
-                "minus_di": round(minus_di, 2),
-                "ema20_daily": round(daily_ema20, 2),
-                "ema50_daily": round(daily_ema50, 2),
-                "ema20_slope_5d": round(ema20_slope_5d, 4),
-                "atr": round(atr, 2),
-                "atr_20d_sma": round(atr_20d_sma, 4),
-                "atr_spike_ratio": round(atr_spike_ratio, 4),
-                "atr_ratio": round(atr_spike_ratio, 4),
-                "donchian_high_20": round(donchian_high_20, 2),
-                "donchian_low_20": round(donchian_low_20, 2),
-                "donchian_mid_20": round(donchian_mid_20, 2),
-                "bb_upper": round(bb_upper, 2),
-                "bb_lower": round(bb_lower, 2),
-                "bb_mid": round(bb_mid, 2),
-                "bb_bandwidth": round(bb_bandwidth, 4),
-                "bb_pct_b": round(bb_pct_b, 4),
-                "%b": round(bb_pct_b, 4),
-                "kc_upper": round(kc_upper, 2),
-                "kc_lower": round(kc_lower, 2),
-                "kc_mid": round(kc_mid, 2),
-                "macd": round(macd, 4),
-                "macd_signal": round(macd_signal, 4),
-                "macd_hist": round(macd_hist, 4),
-                "realized_vol": round(realized_vol, 4),
-                "high_20d": round(high_20d, 2),
-                "earnings_in_days": earnings_days,
-                "vwap": round(vwap_val, 2),
-                "vwap_dist_pct": round(vwap_dist_pct, 2),
-                "vwap_upper_1std": round(vwap_upper_1std, 2),
-                "vwap_lower_1std": round(vwap_lower_1std, 2),
-            }
-
-        # 2. Pure Python list-of-dicts calculation fallback
-        candles = daily_data if isinstance(daily_data, list) else []
-        if len(candles) < 30:
+        elif isinstance(daily_data, list):
+            if len(daily_data) < 30:
+                return {}
+        else:
             return {}
 
-        closes = [c["close"] for c in candles]
-        highs = [c["high"] for c in candles]
-        lows = [c["low"] for c in candles]
+        d_dates, d_opens, d_highs, d_lows, d_closes, d_volumes = MarketDataProvider._extract_ohlcv_arrays(daily_data)
+        if len(d_closes) < (50 if is_df else 30):
+            return {}
 
-        current_close = closes[-1]
-        n_sma = min(200, len(closes))
-        sma200 = sum(closes[-n_sma:]) / n_sma
-        sma200_dist = ((current_close - sma200) / sma200) * 100
+        if MarketDataProvider._is_nonempty_bars(intraday_data):
+            intraday_src = intraday_data
+            timeframe = "5m"
+            vwap_default_win = 78
+        elif MarketDataProvider._is_nonempty_bars(hourly_data):
+            intraday_src = hourly_data
+            timeframe = "1h"
+            vwap_default_win = 24
+        else:
+            intraday_src = None
+            timeframe = "1d"
+            vwap_default_win = 24
 
-        def calc_ema(vals: List[float], span: int) -> float:
-            if not vals:
-                return 0.0
-            alpha = 2.0 / (span + 1.0)
-            ema = vals[0]
-            for v in vals[1:]:
-                ema = alpha * v + (1.0 - alpha) * ema
-            return ema
+        i_dates: List[str] = []
+        i_opens: List[float] = []
+        i_highs: List[float] = []
+        i_lows: List[float] = []
+        i_closes: List[float] = []
+        i_volumes: List[float] = []
+        if intraday_src is not None:
+            i_dates, i_opens, i_highs, i_lows, i_closes, i_volumes = MarketDataProvider._extract_ohlcv_arrays(intraday_src)
+            if not i_closes:
+                intraday_src = None
+                timeframe = "1d"
 
-        ema20 = calc_ema(closes[-60:], 20)
-        ema50 = calc_ema(closes[-60:], 50)
-        trend = "up" if ema20 > ema50 else "down"
+        current_close = float(i_closes[-1]) if intraday_src is not None else float(d_closes[-1])
 
-        # Multi-period RSI calculation (Wilder-smoothed)
-        gains, losses = [], []
-        for i in range(1, len(closes)):
-            chg = closes[i] - closes[i - 1]
-            gains.append(max(chg, 0.0))
-            losses.append(max(-chg, 0.0))
+        # Daily macro indicators (SMA200, Daily EMA20/50, 5d slope, RSI, ATR, Donchian, BB, MACD, Realized Vol)
+        n_sma = min(200, len(d_closes))
+        sma200 = sum(d_closes[-n_sma:]) / float(n_sma)
+        sma200_dist = ((current_close - sma200) / sma200) * 100.0 if sma200 > 0 else 0.0
+        sma5 = sum(d_closes[-min(5, len(d_closes)):]) / float(min(5, len(d_closes)))
 
-        def _calc_py_rsi(period: int) -> float:
-            if len(gains) < period:
+        daily_ema20_series = MarketDataProvider._calc_ema(d_closes, 20)
+        daily_ema50_series = MarketDataProvider._calc_ema(d_closes, 50)
+        daily_ema20 = daily_ema20_series[-1]
+        daily_ema50 = daily_ema50_series[-1]
+        slope_anchor = daily_ema20_series[-min(5, len(daily_ema20_series))]
+        ema20_slope_5d = (
+            ((daily_ema20 - slope_anchor) / (slope_anchor + 1e-9)) * 100.0
+            if len(daily_ema20_series) >= 5
+            else 0.0
+        )
+
+        def _calc_ewm_rsi(period: int) -> float:
+            if len(d_closes) < 2:
                 return 50.0
-            avg_g = sum(gains[:period]) / float(period)
-            avg_l = sum(losses[:period]) / float(period)
-            for j in range(period, len(gains)):
-                avg_g = (avg_g * (period - 1) + gains[j]) / float(period)
-                avg_l = (avg_l * (period - 1) + losses[j]) / float(period)
-            if avg_l == 0:
-                return 100.0
-            rs_val = avg_g / avg_l
+            alpha = 1.0 / float(period)
+            g_ema = 0.0
+            l_ema = 0.0
+            for idx in range(1, len(d_closes)):
+                chg = d_closes[idx] - d_closes[idx - 1]
+                g_val = max(chg, 0.0)
+                l_val = max(-chg, 0.0)
+                g_ema = alpha * g_val + (1.0 - alpha) * g_ema
+                l_ema = alpha * l_val + (1.0 - alpha) * l_ema
+            rs_val = g_ema / (l_ema + 1e-9)
             return 100.0 - (100.0 / (1.0 + rs_val))
 
-        rsi3 = _calc_py_rsi(3)
-        rsi7 = _calc_py_rsi(7)
-        rsi14 = _calc_py_rsi(14)
-        sma5 = sum(closes[-min(5, len(closes)):]) / float(min(5, len(closes)))
+        rsi3 = _calc_ewm_rsi(3)
+        rsi7 = _calc_ewm_rsi(7)
+        rsi14 = _calc_ewm_rsi(14)
 
-        # ATR(14)
-        trs = []
-        for i in range(1, len(closes)):
-            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
-            trs.append(tr)
-        atr = sum(trs[-14:]) / 14.0 if len(trs) >= 14 else 1.0
+        # Daily Wilder ATR(14) & 20d SMA spike ratio (preserves RiskManager/PositionMonitor scale)
+        trs = [max(0.0, d_highs[0] - d_lows[0])]
+        for idx in range(1, len(d_closes)):
+            trs.append(
+                max(
+                    d_highs[idx] - d_lows[idx],
+                    abs(d_highs[idx] - d_closes[idx - 1]),
+                    abs(d_lows[idx] - d_closes[idx - 1]),
+                )
+            )
+        atr = trs[0]
+        atr_alpha = 1.0 / 14.0
+        for tr_val in trs[1:]:
+            atr = atr_alpha * tr_val + (1.0 - atr_alpha) * atr
         atr_20d_sma = sum(trs[-min(20, len(trs)):]) / float(min(20, len(trs))) if trs else atr
         atr_spike_ratio = round(atr / (atr_20d_sma + 1e-9), 4) if atr_20d_sma > 0 else 1.0
 
-        # ADX approximation
-        adx = 26.5 if trend == "up" and rsi14 > 55 else (27.0 if trend == "down" and rsi14 < 45 else 18.0)
-        win_h = highs[-20:] if len(highs) >= 20 else highs
-        win_l = lows[-20:] if len(lows) >= 20 else lows
+        # Donchian 20d Channels
+        win_h = d_highs[-min(20, len(d_highs)):]
+        win_l = d_lows[-min(20, len(d_lows)):]
         donchian_high_20 = max(win_h)
         donchian_low_20 = min(win_l)
         donchian_mid_20 = (donchian_high_20 + donchian_low_20) / 2.0
         high_20d = donchian_high_20
 
         # Bollinger Bands (20, 2)
-        import math
-        win_c = closes[-20:] if len(closes) >= 20 else closes
-        bb_mid = sum(win_c) / len(win_c)
-        variance = sum((x - bb_mid) ** 2 for x in win_c) / max(1, len(win_c) - 1)
-        bb_std = math.sqrt(variance)
+        win_c = d_closes[-min(20, len(d_closes)):]
+        bb_mid = sum(win_c) / float(len(win_c))
+        bb_var = sum((x - bb_mid) ** 2 for x in win_c) / max(1, len(win_c) - 1)
+        bb_std = math.sqrt(max(0.0, bb_var))
         bb_upper = bb_mid + 2.0 * bb_std
         bb_lower = bb_mid - 2.0 * bb_std
         bb_bandwidth = ((bb_upper - bb_lower) / bb_mid) if bb_mid > 0 else 0.0
         bb_pct_b = ((current_close - bb_lower) / (bb_upper - bb_lower)) if (bb_upper - bb_lower) > 0 else 0.5
 
-        # Keltner Channels (EMA20 +/- 2 * ATR)
+        # MACD (12, 26, 9)
+        ema12_series = MarketDataProvider._calc_ema(d_closes, 12)
+        ema26_series = MarketDataProvider._calc_ema(d_closes, 26)
+        macd_series = [ema12_series[i] - ema26_series[i] for i in range(len(d_closes))]
+        macd_sig_series = MarketDataProvider._calc_ema(macd_series, 9)
+        macd = macd_series[-1]
+        macd_signal = macd_sig_series[-1]
+        macd_hist = macd - macd_signal
+
+        # 20-day annualized realized volatility
+        pct_changes = [
+            (d_closes[i] - d_closes[i - 1]) / d_closes[i - 1]
+            for i in range(max(1, len(d_closes) - 20), len(d_closes))
+            if d_closes[i - 1] > 0
+        ]
+        if len(pct_changes) > 5:
+            mean_r = sum(pct_changes) / float(len(pct_changes))
+            var_r = sum((r - mean_r) ** 2 for r in pct_changes) / float(len(pct_changes) - 1)
+            realized_vol = math.sqrt(max(0.0, var_r)) * (252.0 ** 0.5)
+        else:
+            realized_vol = 0.25
+        if not (realized_vol > 0):
+            realized_vol = 0.25
+
+        # Intraday-anchored EMA20/50, ADX/DMI, and Session VWAP
+        if intraday_src is not None:
+            ema20 = MarketDataProvider._calc_ema(i_closes, 20)[-1]
+            ema50 = MarketDataProvider._calc_ema(i_closes, 50)[-1]
+            if len(i_closes) >= 28:
+                adx, plus_di, minus_di = MarketDataProvider._calc_wilder_dmi(i_highs, i_lows, i_closes)
+            else:
+                adx, plus_di, minus_di = MarketDataProvider._calc_wilder_dmi(d_highs, d_lows, d_closes)
+            vwap_val, vwap_dist_pct, vwap_upper_1std, vwap_lower_1std = MarketDataProvider._compute_session_vwap(
+                i_dates, i_highs, i_lows, i_closes, i_volumes, current_close, default_window=vwap_default_win
+            )
+        else:
+            ema20 = daily_ema20
+            ema50 = daily_ema50
+            adx, plus_di, minus_di = MarketDataProvider._calc_wilder_dmi(d_highs, d_lows, d_closes)
+            vwap_val, vwap_dist_pct, vwap_upper_1std, vwap_lower_1std = MarketDataProvider._compute_session_vwap(
+                d_dates, d_highs, d_lows, d_closes, d_volumes, current_close, default_window=24
+            )
+
+        trend = "up" if ema20 > ema50 else "down"
         kc_mid = ema20
         kc_upper = kc_mid + 2.0 * atr
         kc_lower = kc_mid - 2.0 * atr
 
-        # MACD (12, 26, 9)
-        ema12 = calc_ema(closes[-60:], 12)
-        ema26 = calc_ema(closes[-60:], 26)
-        macd = ema12 - ema26
-        macd_signal = calc_ema([macd * 0.9, macd * 0.95, macd], 9) if macd != 0 else 0.0
-        macd_hist = macd - macd_signal
-
-        # 20-day annualized realized volatility fallback
-        ret_window = [
-            (closes[i] - closes[i - 1]) / closes[i - 1]
-            for i in range(max(1, len(closes) - 20), len(closes))
-        ]
-        if ret_window:
-            mean_r = sum(ret_window) / len(ret_window)
-            var_r = sum((r - mean_r) ** 2 for r in ret_window) / max(1, len(ret_window) - 1)
-            realized_vol = round((var_r ** 0.5) * (252 ** 0.5), 4)
+        if intraday_src is not None and len(i_closes) >= 20:
+            bars = MarketDataProvider._serialize_bars(
+                i_dates, i_opens, i_highs, i_lows, i_closes, i_volumes, max_bars=120
+            )
+            bars_timeframe = timeframe
         else:
-            realized_vol = 0.25
-
-        # Session VWAP pure-Python fallback
-        c_win = closes[-min(24, len(closes)):]
-        h_win = highs[-min(24, len(highs)):]
-        l_win = lows[-min(24, len(lows)):]
-        v_win = [float(c.get("volume", 0) or 0) for c in candles[-min(24, len(candles)):]]
-        sum_v = sum(v_win)
-        typ_px = [(h_win[i] + l_win[i] + c_win[i]) / 3.0 for i in range(len(c_win))]
-
-        if sum_v > 0:
-            vwap_val = sum(typ_px[i] * v_win[i] for i in range(len(c_win))) / sum_v
-            variance_vwap = sum(((typ_px[i] - vwap_val) ** 2) * v_win[i] for i in range(len(c_win))) / sum_v
-            vwap_std = math.sqrt(variance_vwap)
-        else:
-            vwap_val = sum(typ_px) / len(typ_px)
-            variance_vwap = sum((p - vwap_val) ** 2 for p in typ_px) / max(1, len(typ_px) - 1)
-            vwap_std = math.sqrt(variance_vwap)
-
-        vwap_dist_pct = ((current_close - vwap_val) / vwap_val) * 100.0 if vwap_val > 0 else 0.0
-        vwap_upper_1std = vwap_val + vwap_std
-        vwap_lower_1std = max(0.01, vwap_val - vwap_std)
+            bars = MarketDataProvider._serialize_bars(
+                d_dates, d_opens, d_highs, d_lows, d_closes, d_volumes, max_bars=120
+            )
+            bars_timeframe = "1d"
 
         return {
             "close": current_close,
@@ -2706,11 +2910,11 @@ class MarketDataProvider:
             "rsi7": round(rsi7, 2),
             "rsi14": round(rsi14, 2),
             "adx": round(adx, 2),
-            "plus_di": 25.0 if trend == "up" else 15.0,
-            "minus_di": 15.0 if trend == "up" else 25.0,
-            "ema20_daily": round(ema20, 2),
-            "ema50_daily": round(ema50, 2),
-            "ema20_slope_5d": 0.5 if trend == "up" else -0.5,
+            "plus_di": round(plus_di, 2),
+            "minus_di": round(minus_di, 2),
+            "ema20_daily": round(daily_ema20, 2),
+            "ema50_daily": round(daily_ema50, 2),
+            "ema20_slope_5d": round(ema20_slope_5d, 4),
             "atr": round(atr, 2),
             "atr_20d_sma": round(atr_20d_sma, 4),
             "atr_spike_ratio": round(atr_spike_ratio, 4),
@@ -2737,4 +2941,6 @@ class MarketDataProvider:
             "vwap_dist_pct": round(vwap_dist_pct, 2),
             "vwap_upper_1std": round(vwap_upper_1std, 2),
             "vwap_lower_1std": round(vwap_lower_1std, 2),
+            "timeframe": bars_timeframe,
+            "bars": bars,
         }

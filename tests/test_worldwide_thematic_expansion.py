@@ -207,7 +207,7 @@ class TestWorldwideThematicExpansion(unittest.TestCase):
             # Simulate only 2 assets active
             mock_active.side_effect = lambda sym: sym in ("SPY", "QQQ")
             with patch("trading_system.orchestrator.MarketDataProvider.get_daily_candles", return_value=[]):
-                with patch("trading_system.orchestrator.MarketDataProvider.get_hourly_candles", return_value=[]):
+                with patch("trading_system.orchestrator.MarketDataProvider.get_5m_candles", return_value=[]):
                     with patch("trading_system.orchestrator.MarketDataProvider.compute_indicators", return_value={"close": 100.0}):
                         metrics = orch.ingest_universe_data(filter_active_sessions=True)
                         # Should have ingested only the 2 active assets

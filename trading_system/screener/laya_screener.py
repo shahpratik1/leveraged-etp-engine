@@ -540,11 +540,12 @@ class LayaScreener:
             else (str(earnings_raw) if earnings_raw is not None else "None within 7d")
         )
 
+        tf_label = str(metrics.get("timeframe") or "5m").upper()
         state: str = (
             f"Asset: {ticker}\n"
             f"Daily Close: {close:.2f} | 200 SMA: {sma200:.2f} "
             f"(Distance: {sma200_dist:+.1f}%)\n"
-            f"1H Trend: 20 EMA={ema20:.2f}, "
+            f"{tf_label} Trend: 20 EMA={ema20:.2f}, "
             f"50 EMA={ema50:.2f} | "
             f"Trend: {metrics.get('trend', 'unknown')}\n"
             f"Momentum: RSI(3)={rsi3:.1f}, RSI(7)={rsi7:.1f}, "

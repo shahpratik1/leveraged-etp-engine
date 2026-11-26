@@ -269,12 +269,14 @@ class MultiProviderRouter:
                 return records
         return None
 
-    def fetch_fmp_hourly(self, symbol: str, api_key: str) -> Optional[List[Dict[str, Any]]]:
-        """Fetch hourly OHLCV from Financial Modeling Prep."""
+    def _fetch_fmp_intraday(
+        self, symbol: str, api_key: str, chart_interval: str = "5min", label: str = "5m"
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Fetch intraday OHLCV bars from Financial Modeling Prep for a given chart interval."""
         if not api_key:
             return None
         clean = symbol.upper().replace("^", "")
-        url = f"https://financialmodelingprep.com/api/v3/historical-chart/1hour/{clean}?apikey={api_key}"
+        url = f"https://financialmodelingprep.com/api/v3/historical-chart/{chart_interval}/{clean}?apikey={api_key}"
         status, data = self._http_get_json(url)
         is_429 = status == 429 or (isinstance(data, dict) and "limit" in str(data.get("Error Message", "")).lower())
         self.record_response("fmp", status, is_rate_limited=is_429)
@@ -290,9 +292,17 @@ class MultiProviderRouter:
                     "volume": float(bar.get("volume", 0.0)),
                 })
             if records:
-                logger.info("MarketDataRouter: Fetched %d hourly candles for %s via [FMP]", len(records), symbol)
+                logger.info("MarketDataRouter: Fetched %d %s candles for %s via [FMP]", len(records), label, symbol)
                 return records
         return None
+
+    def fetch_fmp_hourly(self, symbol: str, api_key: str) -> Optional[List[Dict[str, Any]]]:
+        """Fetch hourly OHLCV from Financial Modeling Prep."""
+        return self._fetch_fmp_intraday(symbol, api_key, chart_interval="1hour", label="hourly")
+
+    def fetch_fmp_5m(self, symbol: str, api_key: str) -> Optional[List[Dict[str, Any]]]:
+        """Fetch 5-minute OHLCV from Financial Modeling Prep."""
+        return self._fetch_fmp_intraday(symbol, api_key, chart_interval="5min", label="5m")
 
     def fetch_fmp_quote(self, symbol: str, api_key: str) -> Optional[Dict[str, float]]:
         """Fetch bid/ask and current price quote from FMP."""
@@ -391,15 +401,24 @@ class MultiProviderRouter:
 
     # ── Polygon.io ──
 
-    def fetch_polygon_daily(self, symbol: str, api_key: str) -> Optional[List[Dict[str, Any]]]:
-        """Fetch daily candles from Polygon.io."""
+    def _fetch_polygon_aggs(
+        self,
+        symbol: str,
+        api_key: str,
+        multiplier: int,
+        timespan: str,
+        days_back: int,
+        dt_format: str,
+        label: str,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Fetch aggregate OHLCV bars from Polygon.io for a given multiplier and timespan."""
         if not api_key:
             return None
         clean = symbol.upper().replace("^", "")
         now = datetime.now(timezone.utc)
-        start = (now - timedelta(days=365)).strftime("%Y-%m-%d")
+        start = (now - timedelta(days=days_back)).strftime("%Y-%m-%d")
         end = now.strftime("%Y-%m-%d")
-        url = f"https://api.polygon.io/v2/aggs/ticker/{clean}/range/1/day/{start}/{end}?apiKey={api_key}"
+        url = f"https://api.polygon.io/v2/aggs/ticker/{clean}/range/{multiplier}/{timespan}/{start}/{end}?apiKey={api_key}"
         status, data = self._http_get_json(url)
         is_429 = status == 429 or (isinstance(data, dict) and "exceeded" in str(data.get("message", "")).lower())
         self.record_response("polygon", status, is_rate_limited=is_429)
@@ -408,7 +427,7 @@ class MultiProviderRouter:
             records = []
             for bar in results:
                 ts_sec = bar.get("t", 0) / 1000.0
-                d_str = datetime.fromtimestamp(ts_sec, tz=timezone.utc).strftime("%Y-%m-%d")
+                d_str = datetime.fromtimestamp(ts_sec, tz=timezone.utc).strftime(dt_format)
                 records.append({
                     "date": d_str,
                     "open": float(bar["o"]),
@@ -418,40 +437,21 @@ class MultiProviderRouter:
                     "volume": float(bar.get("v", 0.0)),
                 })
             if records:
-                logger.info("MarketDataRouter: Fetched %d daily candles for %s via [Polygon]", len(records), symbol)
+                logger.info("MarketDataRouter: Fetched %d %s candles for %s via [Polygon]", len(records), label, symbol)
                 return records
         return None
 
+    def fetch_polygon_daily(self, symbol: str, api_key: str) -> Optional[List[Dict[str, Any]]]:
+        """Fetch daily candles from Polygon.io."""
+        return self._fetch_polygon_aggs(symbol, api_key, 1, "day", 365, "%Y-%m-%d", "daily")
+
     def fetch_polygon_hourly(self, symbol: str, api_key: str) -> Optional[List[Dict[str, Any]]]:
         """Fetch hourly candles from Polygon.io."""
-        if not api_key:
-            return None
-        clean = symbol.upper().replace("^", "")
-        now = datetime.now(timezone.utc)
-        start = (now - timedelta(days=35)).strftime("%Y-%m-%d")
-        end = now.strftime("%Y-%m-%d")
-        url = f"https://api.polygon.io/v2/aggs/ticker/{clean}/range/1/hour/{start}/{end}?apiKey={api_key}"
-        status, data = self._http_get_json(url)
-        is_429 = status == 429 or (isinstance(data, dict) and "exceeded" in str(data.get("message", "")).lower())
-        self.record_response("polygon", status, is_rate_limited=is_429)
-        if status == 200 and isinstance(data, dict):
-            results = data.get("results", [])
-            records = []
-            for bar in results:
-                ts_sec = bar.get("t", 0) / 1000.0
-                d_str = datetime.fromtimestamp(ts_sec, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                records.append({
-                    "date": d_str,
-                    "open": float(bar["o"]),
-                    "high": float(bar["h"]),
-                    "low": float(bar["l"]),
-                    "close": float(bar["c"]),
-                    "volume": float(bar.get("v", 0.0)),
-                })
-            if records:
-                logger.info("MarketDataRouter: Fetched %d hourly candles for %s via [Polygon]", len(records), symbol)
-                return records
-        return None
+        return self._fetch_polygon_aggs(symbol, api_key, 1, "hour", 35, "%Y-%m-%d %H:%M:%S", "hourly")
+
+    def fetch_polygon_5m(self, symbol: str, api_key: str) -> Optional[List[Dict[str, Any]]]:
+        """Fetch 5-minute intraday candles from Polygon.io."""
+        return self._fetch_polygon_aggs(symbol, api_key, 5, "minute", 5, "%Y-%m-%d %H:%M:%S", "5m")
 
     def fetch_polygon_quote(self, symbol: str, api_key: str) -> Optional[Dict[str, float]]:
         """Fetch real-time top-of-book or previous close quote from Polygon.io."""
@@ -544,6 +544,30 @@ class MultiProviderRouter:
     # Waterfall Execution Cascades
     # ─────────────────────────────────────────────────────────────────
 
+    def _run_candle_cascade(
+        self,
+        symbol: str,
+        chain: List[Tuple[str, Optional[str], Callable[[], Optional[List[Dict[str, Any]]]]]],
+        label: str,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Run a quota-aware provider waterfall cascade for candle retrieval."""
+        for prov_name, key, fetcher in chain:
+            can_call, reason = self.can_request(prov_name, key)
+            if not can_call:
+                if reason != "no_api_key":
+                    logger.info("MarketDataRouter: Skipping [%s] for %s (%s). Cascading...", prov_name, symbol, reason)
+                continue
+
+            self.record_request(prov_name)
+            try:
+                result = fetcher()
+                if result:
+                    return result
+            except Exception as exc:
+                logger.debug("MarketDataRouter: [%s] %s fetch error for %s: %s", prov_name, label, symbol, exc)
+
+        return None
+
     def get_daily_candles_cascade(
         self,
         symbol: str,
@@ -562,23 +586,7 @@ class MultiProviderRouter:
             ("polygon", poly_key, lambda: self.fetch_polygon_daily(symbol, poly_key)),
             ("alpha_vantage", av_key, lambda: self.fetch_alphavantage_daily(symbol, av_key)),
         ]
-
-        for prov_name, key, fetcher in chain:
-            can_call, reason = self.can_request(prov_name, key)
-            if not can_call:
-                if reason != "no_api_key":
-                    logger.info("MarketDataRouter: Skipping [%s] for %s (%s). Cascading...", prov_name, symbol, reason)
-                continue
-
-            self.record_request(prov_name)
-            try:
-                result = fetcher()
-                if result:
-                    return result
-            except Exception as exc:
-                logger.debug("MarketDataRouter: [%s] fetch error for %s: %s", prov_name, symbol, exc)
-
-        return None
+        return self._run_candle_cascade(symbol, chain, "daily")
 
     def get_hourly_candles_cascade(
         self,
@@ -594,23 +602,23 @@ class MultiProviderRouter:
             ("fmp", fmp_key, lambda: self.fetch_fmp_hourly(symbol, fmp_key)),
             ("polygon", poly_key, lambda: self.fetch_polygon_hourly(symbol, poly_key)),
         ]
+        return self._run_candle_cascade(symbol, chain, "hourly")
 
-        for prov_name, key, fetcher in chain:
-            can_call, reason = self.can_request(prov_name, key)
-            if not can_call:
-                if reason != "no_api_key":
-                    logger.info("MarketDataRouter: Skipping [%s] for %s (%s). Cascading...", prov_name, symbol, reason)
-                continue
+    def get_5m_candles_cascade(
+        self,
+        symbol: str,
+        settings_obj: Any,
+        period: str = "5d",
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Execute waterfall cascade for 5-minute intraday candles respecting quotas."""
+        fmp_key = getattr(settings_obj, "FMP_API_KEY", "")
+        poly_key = getattr(settings_obj, "POLYGON_API_KEY", "")
 
-            self.record_request(prov_name)
-            try:
-                result = fetcher()
-                if result:
-                    return result
-            except Exception as exc:
-                logger.debug("MarketDataRouter: [%s] hourly fetch error for %s: %s", prov_name, symbol, exc)
-
-        return None
+        chain: List[Tuple[str, Optional[str], Callable[[], Optional[List[Dict[str, Any]]]]]] = [
+            ("fmp", fmp_key, lambda: self.fetch_fmp_5m(symbol, fmp_key)),
+            ("polygon", poly_key, lambda: self.fetch_polygon_5m(symbol, poly_key)),
+        ]
+        return self._run_candle_cascade(symbol, chain, "5m")
 
     def get_quote_cascade(
         self,

@@ -180,6 +180,7 @@ class VWAPStrategy(BaseStrategy):
         short_base_conv: float = params["short_base_conviction"]
         max_conv: float = params["max_conviction"]
         broad_indices: Set[str] = params["broad_indices"]
+        timeframe: str = str(metrics.get("timeframe", "1d")) if isinstance(metrics, dict) else "1d"
 
         close = _safe_float(metrics.get("close"), 0.0) or 0.0
         vwap = _safe_float(metrics.get("vwap"), close) or close
@@ -277,6 +278,7 @@ class VWAPStrategy(BaseStrategy):
                     bull_evidence=bull_evidence,
                     bear_evidence=bear_evidence,
                     catalyst_risk=catalyst_risk,
+                    timeframe=timeframe,
                     gate_rejections=gate_rejections,
                     config_epoch_id=epoch_id,
                 )
@@ -308,6 +310,7 @@ class VWAPStrategy(BaseStrategy):
                 bull_evidence=bull_evidence,
                 bear_evidence=bear_evidence,
                 catalyst_risk=catalyst_risk,
+                timeframe=timeframe,
                 gate_rejections=None,
                 config_epoch_id=epoch_id,
             )
@@ -333,6 +336,7 @@ class VWAPStrategy(BaseStrategy):
                         bull_evidence=bull_evidence,
                         bear_evidence=bear_evidence,
                         catalyst_risk=catalyst_risk,
+                        timeframe=timeframe,
                         gate_rejections=gate_rejections,
                         config_epoch_id=epoch_id,
                     )
@@ -361,6 +365,7 @@ class VWAPStrategy(BaseStrategy):
                     bull_evidence=bull_evidence,
                     bear_evidence=bear_evidence,
                     catalyst_risk=catalyst_risk,
+                    timeframe=timeframe,
                     gate_rejections=None,
                     config_epoch_id=epoch_id,
                 )
@@ -381,6 +386,7 @@ class VWAPStrategy(BaseStrategy):
                     bull_evidence=bull_evidence,
                     bear_evidence=bear_evidence,
                     catalyst_risk=catalyst_risk,
+                    timeframe=timeframe,
                     gate_rejections=[{
                         "gate_id": "dual_track_gate:SINGLE_EQUITY_CASH_DEFENSE",
                         "param_keys": ["BROAD_INDICES"],
@@ -413,6 +419,7 @@ class VWAPStrategy(BaseStrategy):
             bull_evidence=bull_evidence,
             bear_evidence=bear_evidence,
             catalyst_risk=catalyst_risk,
+            timeframe=timeframe,
             gate_rejections=gate_rejections,
             config_epoch_id=epoch_id,
         )
